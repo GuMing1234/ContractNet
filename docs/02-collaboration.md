@@ -142,6 +142,7 @@ git config --global user.email "数字ID+GitHub用户名@users.noreply.github.co
 ## 九、代码风格
 
 交给工具，不做争论：
+ruff是一个代码检查和格式化工具，主要用来把代码弄整齐
 
 ```bash
 python -m ruff format .

@@ -67,7 +67,7 @@ git config user.email "你的GitHub用户名@users.noreply.github.com"
 git checkout main
 git pull
 
-# 3. 建分支
+# 3. 建分支  这后面 “docs/add-你的名字” 是一个分支名，用来区分不同人的
 git checkout -b docs/add-你的名字
 
 # 4. 编辑 docs/06-members.md，加上你自己那一行
@@ -102,11 +102,11 @@ git push
 
 ## 五、常见故障
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| `push` 被拒绝 | `main` 受保护 | 正常。改推自己的分支后开 PR |
-| `rejected - non-fast-forward` | 分支落后 | `git merge main` 后再推 |
-| 出现 `<<<<<<< HEAD` | 冲突 | 打开文件删除标记行，保留目标内容 |
-| PR 显示几十个文件改动 | 分支基点过旧 | 关闭 PR，从最新 `main` 重新建分支 |
-| `UnicodeEncodeError` | 缺少 `-X utf8` | 加参数重跑 |
-| 误提交 `.env` | 使用了 `git add -f` | **立即吊销该 API Key**，流程见 [02 协作规范](02-collaboration.md) 第七节 |
+| 现象                            | 原因               | 处理                                                       |
+| ----------------------------- | ---------------- | -------------------------------------------------------- |
+| `push` 被拒绝                    | `main` 受保护       | 正常。改推自己的分支后开 PR                                          |
+| `rejected - non-fast-forward` | 分支落后             | `git merge main` 后再推                                     |
+| 出现 `<<<<<<< HEAD`             | 冲突               | 打开文件删除标记行，保留目标内容                                         |
+| PR 显示几十个文件改动                  | 分支基点过旧           | 关闭 PR，从最新 `main` 重新建分支                                   |
+| `UnicodeEncodeError`          | 缺少 `-X utf8`     | 加参数重跑                                                    |
+| 误提交 `.env`                    | 使用了 `git add -f` | **立即吊销该 API Key**，流程见 [02 协作规范](02-collaboration.md) 第七节 |
