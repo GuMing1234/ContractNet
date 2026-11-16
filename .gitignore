@@ -1,0 +1,35 @@
+# ── 密钥（最重要，绝对不能提交）──
+.env
+.env.*
+!.env.example
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# ── 编辑器 ──
+.idea/
+.vscode/
+*.swp
+
+# ── 系统 ──
+.DS_Store
+Thumbs.db
+
+# ── 运行产物 ──
+*.sqlite
+*.db
+*.log
+out.txt
+.contractnet/
+workspace/
+
+# ── 本地笔记（不进仓库）──
+notes/
