@@ -33,3 +33,8 @@ workspace/
 
 # ── 本地笔记（不进仓库）──
 notes/
+
+# ── 参考实现（绝不允许进仓库）──
+reference/
+ContractNet-学长版/
+学长版/
