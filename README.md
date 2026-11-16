@@ -72,10 +72,15 @@ ContractNet/
 
 ## 团队必读（按顺序）
 
-1. [CONTRIBUTING.md](CONTRIBUTING.md) —— 六条铁律，违反会被打回
-2. [docs/github-setup.md](docs/github-setup.md) —— 第一次怎么提交代码
-3. [TASKS.md](TASKS.md) —— 现在有什么活可以领
-4. [docs/members.md](docs/members.md) —— 谁负责什么
+| 顺序 | 文档 | 什么时候看 |
+|---|---|---|
+| 1 | [CONTRIBUTING.md](CONTRIBUTING.md) | 第一天就看，六条铁律 |
+| 2 | [docs/repo-policy.md](docs/repo-policy.md) | 仓库是公开的，这里写清了不能提交什么 |
+| 3 | [docs/github-setup.md](docs/github-setup.md) | 第一次提交代码前 |
+| 4 | [docs/design.md](docs/design.md) | **详细设计 —— 编码期间的唯一技术依据** |
+| 5 | [docs/project-plan.md](docs/project-plan.md) | 分工、里程碑、周会机制 |
+| 6 | [TASKS.md](TASKS.md) | 看现在有什么活可以领 |
+| 7 | [docs/members.md](docs/members.md) | 谁负责什么 |
 
 ---
 
