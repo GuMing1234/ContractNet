@@ -133,6 +133,9 @@
 | **ToolSandbox**      | `tools/sandbox.py`        | 工具执行、权限、超时、截断      | 决定调哪个工具    |
 | **StateStore**       | `memory/store.py`         | 状态与成果物存取、回放        | 校验、判断、决策   |
 | **Tracer**           | `observability/tracer.py` | 日志、span、指标采集       | 修改流程       |
+| **AgentMemory**      | `memory/agent_memory.py`  | 执行日志、能力画像、失败模式、成功模板 | 全局状态管理     |
+| **EventBus**         | `core/event_bus.py`       | 事件发布订阅（协议 + 内存实现）    | 业务判断       |
+| **EvalFramework**    | `eval/`                   | 基准任务、指标计算、实验运行、报告    | 修改系统行为     |
 
 ## 2.3 依赖关系
 
@@ -575,6 +578,20 @@ def replan(self, failed, reason):
     return new_dag, leaves        # 交给 Orchestrator 改接
 ```
 
+**④ 四种分解策略**
+
+| 策略 | 触发条件 | 行为 | 阶段 |
+|---|---|---|---|
+| **初次分解** | 用户提交目标 | 全量分解为子任务 DAG | W3 |
+| **细化分解** | 子任务 `retry_count ≥ max_retries` 且语义不达标 | 拆成 2 个更细子任务，继承父任务的 `input_artifacts` | W5 |
+| **合并分解（升级）** | 相邻子任务频繁互相等待，协调开销大于执行开销 | 合并为单个较大子任务，交由单个 Agent 完成 | W7 |
+| **增量分解** | 执行中发现新需求（如数据缺失需补全） | 在当前 DAG 中插入新子任务，并改接下游依赖 | W7 |
+
+> **合并策略的判定条件**：子任务 `depth` 接近上限，或同一父任务下的子任务之间出现互相等待且总步数低于阈值。
+> 合并时须继承被合并任务的全部 `input_artifacts`，并汇总它们的 `depends_on` 作为合并后任务的依赖。
+
+> **增量策略与重规划的差别**：重规划由**失败**触发；增量分解由**执行中发现的新信息**触发，与失败与否无关。
+
 ### 失效模式分析
 
 | 现象 | 根因 | 对策 |
@@ -887,6 +904,37 @@ class ToolSandbox:
 | `test_run` | 同 code_run | timeout 120s |
 | `list_dir` | workspace 内 | 深度 ≤ 3 |
 
+### 工具定义规格
+
+工具以 OpenAI function calling 格式声明，由 `BaseAgent` 按 Agent 权限过滤后传入模型。
+
+| 工具 | 参数 | 成功返回 | 失败返回 |
+|---|---|---|---|
+| `file_read` | `path: str` | 文件内容（≤100KB） | `Error: 路径越界` / `Error: 文件不存在` |
+| `file_write` | `path: str, content: str` | `OK: 已写入 N 字节` | `Error: 路径越界` / `Error: 写入失败` |
+| `list_dir` | `path: str` | 每行一个条目 | `Error: 路径越界` |
+| `code_run` | `code: str, language: str` | stdout + stderr（≤10KB） | `Error: 超时` / `Error: 非零退出 N` |
+| `test_run` | `target: str` | 测试摘要（通过/失败数） | `Error: 超时` / `Error: 用例失败` |
+
+**三条统一约定**：
+
+1. 工具错误**不抛异常**，以 `Error: ...` 字符串返回给模型，由模型决定是否调整策略
+2. 输出超限一律截断，并在末尾追加 `...[truncated]`
+3. 每次调用记录一条 `tool_call` span（工具名、参数摘要、耗时、结果长度）
+
+### Agent 与工具权限矩阵
+
+| Agent | file_read | file_write | code_run | test_run | list_dir |
+|---|---|---|---|---|---|
+| Coder | ✅ | ✅ | ✅ | — | ✅ |
+| Tester | ✅ | — | ✅ | ✅ | ✅ |
+| Doc | ✅ | ✅ | — | — | ✅ |
+| Analyst | ✅ | ✅ | ✅ | — | ✅ |
+| Reviewer | ✅ | — | — | — | ✅ |
+| General | ✅ | ✅ | ✅ | — | ✅ |
+
+> 权限由 `CapabilityProfile.tools` 声明；契约中的 `required_tools` 与 `forbidden_tools` 在此基础上进一步收窄。
+
 ### 安全底线
 
 > **沙箱是「误操作防护」，不是「安全边界」。** 文档与 README 必须明确写这句，不要宣称能防恶意代码。
@@ -1009,6 +1057,222 @@ goal（root）
 
 ---
 
+## 5.11 AgentMemory（Agent 局部记忆）— owner: R7
+
+### 职责边界
+
+| 负责 | 不负责 |
+|---|---|
+| 记录每个 Agent 的执行历史 | 维护全局状态（StateStore 负责） |
+| 维护按任务类型的能力画像 | 存储成果物本体 |
+| 提炼失败模式与成功模板 | 跨 Agent 共享记忆（本期不做） |
+| 为竞标提供历史成功率与平均质量 | 决定谁中标 |
+
+### 接口
+
+```python
+class AgentMemory:
+    def __init__(self, agent_id: str): ...
+    def record(self, record: ExecutionRecord) -> None: ...
+    def reference(self, task_type: str, limit: int = 2) -> str | None: ...
+    def performance(self, task_type: str) -> AgentPerformance | None: ...
+```
+
+### 四类数据结构
+
+| 结构 | 关键字段 | 用途 |
+|---|---|---|
+| `ExecutionRecord` | task_id / contract_id / task_type / steps / tokens / **success** / **quality** / feedback | 原始执行记录 |
+| `AgentPerformance` | total_tasks / success_rate / avg_cost / avg_steps / avg_quality | 能力画像，供竞标评分使用 |
+| `FailurePattern` | task_type / common_feedback / occurrence_count | 同类失败累计 ≥2 次时提炼，注入后续 prompt |
+| `SuccessTemplate` | task_type / description / steps / quality | 成功案例，按 quality 排序取最优 |
+
+### 写入时序（**决定记忆是否真正生效**）
+
+```
+Agent.execute() 结束
+  → 生成 ExecutionRecord（此时 success 与 quality 尚不可知）
+  → Orchestrator 在 QualityGate 给出结论后回写：
+        record.success = gate_result.passed
+        record.quality = gate_result.score
+  → 调用 memory.record(record)
+```
+
+> ⚠️ **失效模式（必须避免）**：若在 `execute()` 内部写入记忆，且将 `success` 硬编码为 `True`，
+> 则 `success_rate` 恒为 1.0、`avg_quality` 恒为 0，
+> 最终 `confidence = 0.4 × capability + 0.3` —— **历史学习完全失效**，且从输出上无法察觉异常。
+
+### 记忆注入
+
+```python
+ref = memory.reference(task_type)
+if ref:
+    system_prompt += f'\n历史经验：\n{ref}'
+```
+
+**注入约束**：单次注入 ≤ 300 字；优先注入「同类失败原因」，其次「成功案例的步数参考」。
+
+**检索方式**：按 `task_type` 精确匹配 + 关键词匹配。**本期不引入向量检索**（成本高、收益低）。
+
+### 与竞标评分的关系
+
+```
+confidence = 0.4 × 静态匹配 + 0.6 × 动态表现
+动态表现   = 0.5 × success_rate + 0.5 × avg_quality
+无历史记录 → 动态表现取先验值 0.5（不得取 0，否则新 Agent 永远无法出价）
+```
+
+### 失效模式分析
+
+| 现象 | 根因 | 对策 |
+|---|---|---|
+| 历史学习不生效 | `success` 硬编码、`quality` 未回写 | 由 Orchestrator 在门控后回写 |
+| 新 Agent 永不出价 | 无历史导致 confidence 偏低 | 无历史时取先验 0.5 |
+| 失败模式库无限膨胀 | 无去重与上限 | 同类型仅保留 1 条，总数 ≤ 20 |
+| 注入内容挤占上下文 | 参考文本过长 | 硬性限制 300 字 |
+| 记忆与画像不一致 | 两处分别更新 | 收敛到单一入口 `record()` |
+
+### 测试点
+
+- [ ] 记录一条失败执行后，`success_rate` 下降
+- [ ] 门控后回写 quality，`avg_quality` 随之变化
+- [ ] 无历史时 `confidence` 不为 0
+- [ ] 同类失败 2 次后生成 `FailurePattern`
+- [ ] 注入文本长度 ≤ 300 字
+
+---
+
+## 5.12 EvalFramework（评估框架）— owner: R8
+
+### 职责边界
+
+| 负责 | 不负责 |
+|---|---|
+| 定义基准任务与成功判据 | 修改系统行为 |
+| 计算各项指标 | 决定指标目标值 |
+| 运行实验并产出报告 | 优化系统性能 |
+
+### 组件结构
+
+```
+eval/
+├── benchmarks/__init__.py   基准任务定义（BENCHMARKS 字典）
+├── metrics.py               指标计算（纯函数，无副作用）
+└── runner.py                实验运行器（重复 N 次、汇总、出报告）
+```
+
+### 基准任务结构
+
+```python
+class BenchmarkTask(BaseModel):
+    name: str
+    goal: str
+    difficulty: Literal['easy', 'medium', 'hard']
+    success_criteria: dict         # 必须可程序化判定
+    needs_human_label: list[str]   # 无法程序化判定的项，须人工标注并记录标注人
+```
+
+> **强制要求**：`success_criteria` 中不得出现「结论有意义」「表述清晰」这类无法程序化的条目。
+> 确需人工判断的，必须移入 `needs_human_label`。
+
+### 指标计算规格（`metrics.py`）
+
+| 指标 | 计算式 | 数据来源 |
+|---|---|---|
+| 任务完成率 | `DONE 数 / 总任务数` | DAG 终态 |
+| 首次通过率 | `一次 Gate 通过的任务数 / 总任务数` | Gate 事件 |
+| **步骤效率** | `实际总步数 / 基准预设的最优步骤数` | 执行记录 + benchmark 预设 |
+| 重规划率 | `触发 REPLANNED 的任务数 / 总任务数` | 状态转移事件 |
+| 冲突检出率 | `检出冲突数 / 注入冲突数` | 冲突事件（注入用例） |
+| Token 效率 | `总 token / 完成任务数`，与基线同口径 | LLMGateway 归因 |
+
+### 实验运行器（`runner.py`）
+
+```python
+def run(benchmark: BenchmarkTask, config: EvalConfig, repeat: int = 5) -> EvalResult:
+    """单个基准 × 单个配置 × repeat 次，返回中位数与范围。"""
+```
+
+**报告结构**（JSON 与 Markdown 双份）：
+
+```json
+{
+  "benchmark": "B1",
+  "config": "contractnet_v1",
+  "repeat": 5,
+  "success_rate":    {"median": 0.80, "min": 0.60, "max": 1.00},
+  "tokens_per_task": {"median": 12345, "min": 9800, "max": 15000},
+  "step_efficiency": {"median": 1.32, "min": 1.10, "max": 1.60},
+  "config_snapshot": {"model": "...", "max_concurrent": 4, "commit": "..."}
+}
+```
+
+### 失效模式分析
+
+| 现象 | 根因 | 对策 |
+|---|---|---|
+| 数据无统计意义 | 单次运行 | 强制 `repeat = 5` |
+| 指标被单指标刷分 | 只报 token | 五个指标同时报 |
+| 判据无法判定 | 使用了主观描述 | 校验器拦截，强制移入 `needs_human_label` |
+| 基线口径不一致 | 更换模型或任务集 | 统一任务集、统一模型、统一判据 |
+| 报告无法复现 | 未记录配置与环境 | 报告内嵌配置快照与 commit 号 |
+
+### 测试点
+
+- [ ] 给定构造的执行记录，`metrics.py` 计算出正确值
+- [ ] `runner.py` 在 `repeat=5` 时输出中位数与范围
+- [ ] 报告包含配置快照
+- [ ] `success_criteria` 校验器能拦截主观描述
+
+---
+
+## 5.13 EventBus（事件总线）— owner: R1
+
+### 为什么需要这一层
+
+当前为单进程运行，模块间可直接函数调用。以下两点要求存在统一的通信抽象：
+
+1. **可回放**：所有协作事件需经单一入口落库，否则回放不完整
+2. **可替换**：二期若引入多进程或分布式部署，只需替换实现，调用方无需改动
+
+### 接口
+
+```python
+class EventBus(Protocol):
+    def publish(self, event: Event) -> None: ...
+    def subscribe(self, topic: str) -> Iterator[Event]: ...
+    def drain(self) -> list[Event]: ...
+```
+
+### 实现策略（ADR-13）
+
+| 阶段 | 实现 | 说明 |
+|---|---|---|
+| W1–W8 | `InMemoryEventBus` | `list` 存储 + 同步回调，**默认实现** |
+| 二期 | `RedisEventBus` | Pub/Sub 或 Streams，仅在需要跨进程时引入 |
+
+> **本期不直接引入 Redis 的理由**：单进程下 Redis 不增加系统能力，只增加调试复杂度与运维负担。
+> 抽象层已隔离变化点，后续切换成本可控。
+
+### 事件类型
+
+见 §3.11。所有事件携带 `event_id / trace_id / ts / task_id`。
+
+### 投递语义
+
+| 实现 | 语义 |
+|---|---|
+| 内存 | 同步、至多一次（进程内不丢失） |
+| Redis | Streams + consumer group，至少一次；消费方须幂等 |
+
+### 测试点
+
+- [ ] 发布的事件能被 `drain()` 取出，且顺序正确
+- [ ] 订阅回调抛异常不影响发布方
+- [ ] 替换实现时，调用方代码无需改动
+
+---
+
 # 6. 接口规格汇总
 
 > W2 冻结后改动需全员同意。
@@ -1053,6 +1317,19 @@ events(trace_id: str) -> list[Event]
 # ── Tracer ──
 span(name: str, **attrs) -> ContextManager
 record_metric(name: str, value: float, tags: dict) -> None
+
+# ── AgentMemory ──
+record(record: ExecutionRecord) -> None
+reference(task_type: str, limit: int = 2) -> str | None
+performance(task_type: str) -> AgentPerformance | None
+
+# ── EventBus ──
+publish(event: Event) -> None
+subscribe(topic: str) -> Iterator[Event]
+drain() -> list[Event]
+
+# ── EvalFramework ──
+run(benchmark: BenchmarkTask, config: EvalConfig, repeat: int = 5) -> EvalResult
 ```
 
 **四条接口公约**：
@@ -1080,6 +1357,9 @@ record_metric(name: str, value: float, tags: dict) -> None
 | **ADR-10** | busy Agent 何时过滤         | **竞标阶段**            | 提交后排队等于先授标再等待，且可能返回空成果物           | 提交时判 busy → 浪费重试次数       |
 | **ADR-11** | 竞标是否调 LLM               | **不调**              | 7 Agent × 5 任务 = 35 次调用，会吃掉全部预算   | 调 LLM 估 plan → 成本爆炸      |
 | **ADR-12** | 裁判失败时                   | **fail-closed**     | 门控是防线，默认放行等于没防线                   | fail-open → 质量指标虚假       |
+| **ADR-13** | 通信层形态                   | **抽象接口 + 内存实现**    | 单进程下 Redis 不增加能力；抽象层已隔离二期变化点      | 直接引入 Redis → 约 40h，且调试复杂度上升 |
+| **ADR-14** | 对比基线数量                  | **单 Agent + 一个现成框架（硬性）** | 可回答"是否优于成熟方案"，同时控制复现成本           | 复现两个框架 → 约 40h，易陷入调试    |
+| **ADR-15** | 指标目标值                   | **完成率 ≥80%、Token 降 ≥25%（基于 5 次重复中位数）** | 3 个基准任务上 85% 等同全过，无容错空间         | 维持 85%/30% → 数据难以成立        |
 
 ---
 
@@ -1122,6 +1402,7 @@ print('ok')
 | 任务完成率 | DONE / 总任务 | ≥ 80% |
 | 首次通过率 | 一次 Gate 通过的比例 | ≥ 60% |
 | 重规划率 | 触发重规划的子任务比例 | ≤ 20% |
+| **步骤效率** | 实际总步数 / 基准预设的最优步骤数 | ≤ 1.5x |
 | 冲突检出率 | 检出数 / 注入的已知冲突数 | ≥ 90% |
 | Token 效率 | 总 token / 完成任务数 | 对比单 Agent 基线降 ≥ 25% |
 
@@ -1203,7 +1484,7 @@ print('ok')
 
 ```
 每个基准任务 × 每种配置 × 5 次重复
-配置：ContractNet / 单Agent基线 /（可选）一个现成框架
+配置：ContractNet / 单 Agent 基线 / 一个现成框架（硬性要求，见 ADR-14）
 报告：中位数 + 范围，而不是单一均值
 ```
 
@@ -1239,17 +1520,29 @@ print('ok')
 | W9  | 文档 + Demo      | 新人 30 分钟能跑起来          |
 | W10 | 缓冲与收尾      | 项目材料与演示视频             |
 
+**本期新增模块的落地时点**
+
+| 模块 | 时点 | 前置依赖 |
+|---|---|---|
+| `EventBus` 抽象（内存实现） | W2 | 随接口冻结一并定稿 |
+| 内置工具集 `tools/builtins.py` | W3 | Agent 执行依赖 |
+| `AgentMemory`（骨架 → 完整） | W5 → W7 | 竞标评分依赖 confidence |
+| 合并分解策略 | W7 | 依赖冲突检测产生的协调数据 |
+| `EvalFramework` | W8 | MVP 稳定后 |
+
 ## 14.3 终态定义
 
 > 一个能够自主完成协作拓扑决策，并可量化证明其相对单 Agent 方案优势的系统。
 
 具体包含：
-1. 三层门控全部生效，且分数是真实评分
-2. 五种冲突全部可检出、有消解动作
-3. 重规划能正确改接依赖，不丢任务
-4. 全链路 trace 可回放
-5. 有 3 个基准 × 5 次重复的对比数据
-6. 有 Demo 视频 + README + 架构文档
+1. 三层门控全部生效，且分数为真实评分
+2. 五种冲突全部可检出，且均有对应消解动作
+3. 重规划能正确改接依赖，不丢失下游任务
+4. **四种分解策略均可用**（初次 / 细化 / 合并 / 增量）
+5. **记忆反馈回路闭合**：门控结论正确回写，`confidence` 随历史变化
+6. 全链路 trace 可回放
+7. **评估框架产出五项指标**，且有 3 个基准 × 5 次重复的对比数据
+8. 有 Demo 视频 + README + 架构文档
 
 ## 14.4 二期方向（明确不在本期）
 
