@@ -1,0 +1,31 @@
+# 统一换行符处理
+# 仓库内统一存为 LF；检出到 Windows 时由 Git 自动处理。
+# 没有这个文件时，Windows 用户保存一次文件就会把整份文件的换行符改掉，
+# 导致「只改了一行」在 PR 里显示成「整个文件都改了」。
+
+* text=auto
+
+# 明确指定为 LF 的文件类型
+*.py      text eol=lf
+*.md      text eol=lf
+*.txt     text eol=lf
+*.toml    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.sh      text eol=lf
+*.cfg     text eol=lf
+*.ini     text eol=lf
+
+# 二进制文件不做换行符转换
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
+*.zip     binary
+*.sqlite  binary
+
+# 让 git 在 diff 时把 .ipynb 当作二进制以外的结构化文件处理（预留）
+*.ipynb   text eol=lf
