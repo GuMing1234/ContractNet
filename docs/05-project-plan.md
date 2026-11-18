@@ -41,17 +41,18 @@
 
 ## 2.2 八个角色
 
-| 角色            | 代号     | 负责模块                  | 文件                                     | 关键路径 |
-| ------------- | ------ | --------------------- | -------------------------------------- | ---- |
-| **架构与契约**     | **R1** | Types + Orchestrator  | `core/types.py` `core/orchestrator.py` | ⭐⭐⭐  |
-| **任务分解**      | **R2** | Planner               | `core/planner.py`                      | ⭐    |
-| **竞标仲裁**      | **R3** | Auctioneer            | `core/auctioneer.py`                   | ⭐    |
-| **Agent 运行时** | **R4** | Agent + ReAct         | `core/agent.py`                        | ⭐⭐⭐  |
-| **工具与网关**     | **R5** | Sandbox + LLMGateway  | `tools/sandbox.py` `llm/client.py`     | ⭐⭐   |
-| **质量门控**      | **R6** | QualityGate           | `core/quality_gate.py`                 | ⭐⭐⭐  |
-| **冲突与存储**     | **R7** | Conflict + StateStore | `core/conflict.py` `memory/store.py`   | ⭐⭐   |
-| **观测与评估**     | **R8** | Tracer + Eval         | `observability/` `eval/`               | ⭐⭐   |
+| 角色            | 代号     | 负责模块                              | 文件                                                          | 关键路径 |
+| ------------- | ------ | --------------------------------- | ----------------------------------------------------------- | ---- |
+| **架构与契约**     | **R1** | Types + Orchestrator + EventBus   | `core/types.py` `core/orchestrator.py` `core/event_bus.py`   | ⭐⭐⭐  |
+| **任务分解**      | **R2** | Planner                           | `core/planner.py`                                           | ⭐    |
+| **竞标仲裁**      | **R3** | Auctioneer                        | `core/auctioneer.py`                                        | ⭐    |
+| **Agent 运行时** | **R4** | Agent + ReAct                     | `core/agent.py`                                             | ⭐⭐⭐  |
+| **工具与网关**     | **R5** | Sandbox + LLMGateway + 内置工具       | `tools/sandbox.py` `llm/client.py` `tools/builtins.py`       | ⭐⭐   |
+| **质量门控**      | **R6** | QualityGate                       | `core/quality_gate.py`                                      | ⭐⭐⭐  |
+| **冲突与存储**     | **R7** | Conflict + StateStore + AgentMemory | `core/conflict.py` `memory/store.py` `memory/agent_memory.py` | ⭐⭐   |
+| **观测与评估**     | **R8** | Tracer + Eval                     | `observability/` `eval/`                                    | ⭐⭐   |
 
+> 本表按**角色**汇总，用于派活与认领；文件的完整清单、各模块的职责边界与「明确不负责」，以 [04 · 详细设计](04-design.md) §2.2 为准。
 
 > **负责人 = R1 + PM**。R1 的工作量最大但最需要全局视野，适合负责人；
 > 但**必须配 backup 分担 orchestrate 的联调工作**（建议 R4 或 R6 兼）。

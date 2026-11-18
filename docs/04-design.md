@@ -131,6 +131,7 @@
 | **ConflictResolver** | `core/conflict.py`        | 冲突检测、消解策略          | 判断单个成果物质量  |
 | **LLMGateway**       | `llm/client.py`           | 统一模型调用、重试、缓存、预算    | 业务判断       |
 | **ToolSandbox**      | `tools/sandbox.py`        | 工具执行、权限、超时、截断      | 决定调哪个工具    |
+| **BuiltinTools**     | `tools/builtins.py`       | 内置工具实现（`file_read` / `file_write` / `list_dir` / `code_run` / `test_run`） | 权限校验与超时（由 ToolSandbox 统一处理） |
 | **StateStore**       | `memory/store.py`         | 状态与成果物存取、回放        | 校验、判断、决策   |
 | **Tracer**           | `observability/tracer.py` | 日志、span、指标采集       | 修改流程       |
 | **AgentMemory**      | `memory/agent_memory.py`  | 执行日志、能力画像、失败模式、成功模板 | 全局状态管理     |
@@ -490,13 +491,13 @@ ready(task) ⟺ task.status == PENDING
 
 ## 4.5 并发控制
 
-| 规则 | 说明 |
-|---|---|
-| 最大并发 | `max_concurrent`（默认 4） |
-| Agent 互斥 | 同一 Agent 不能并行执行两个 Task |
-| **忙碌 Agent 在竞标阶段就过滤** | 不要在提交后才排队（见 ADR-10） |
-| 超时 | 每 Task wall-clock 超时（默认 180s），超时视为失败 |
-| 取消 | 支持全局 cancel，向所有在跑任务发取消信号 |
+| 规则                    | 说明                                   |
+| --------------------- | ------------------------------------ |
+| 最大并发                  | `max_concurrent`（默认 4）               |
+| Agent 互斥              | 同一 Agent 不能并行执行两个 Task               |
+| **忙碌 Agent 在竞标阶段就过滤** | 不要在提交后才排队（见 ADR-10）                  |
+| 超时                    | 每 Task wall-clock 超时（默认 180s），超时视为失败 |
+| 取消                    | 支持全局 cancel，向所有在跑任务发取消信号             |
 
 ## 4.6 异常分类与处理矩阵（**必读**）
 
