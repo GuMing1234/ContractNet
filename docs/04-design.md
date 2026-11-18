@@ -131,6 +131,7 @@
 | **ConflictResolver** | `core/conflict.py`        | 冲突检测、消解策略          | 判断单个成果物质量  |
 | **LLMGateway**       | `llm/client.py`           | 统一模型调用、重试、缓存、预算    | 业务判断       |
 | **ToolSandbox**      | `tools/sandbox.py`        | 工具执行、权限、超时、截断      | 决定调哪个工具    |
+| **BuiltinTools**     | `tools/builtins.py`       | 内置工具实现（`file_read` / `file_write` / `list_dir` / `code_run` / `test_run`） | 权限校验与超时（由 ToolSandbox 统一处理） |
 | **StateStore**       | `memory/store.py`         | 状态与成果物存取、回放        | 校验、判断、决策   |
 | **Tracer**           | `observability/tracer.py` | 日志、span、指标采集       | 修改流程       |
 | **AgentMemory**      | `memory/agent_memory.py`  | 执行日志、能力画像、失败模式、成功模板 | 全局状态管理     |
