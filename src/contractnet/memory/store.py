@@ -9,6 +9,13 @@
 from __future__ import annotations
 
 
+def _trace_id_of(event) -> str | None:
+    '''兼容 dict 与模型两种事件载体，W2 切换 Event 模型时不至于静默返回空。'''
+    if isinstance(event, dict):
+        return event.get('trace_id')
+    return getattr(event, 'trace_id', None)
+
+
 class StateStore:
     '''先用内存字典，W7 再换 SQLite（可选加 Redis 做热缓存）。'''
 
@@ -27,8 +34,19 @@ class StateStore:
         return list(self._artifacts.values())
 
     def log_event(self, event: dict) -> None:
-        '''记录事件（用于回放）。'''
+        '''记录事件（用于回放）。
+
+        TODO(W2): 参数类型改为 Event。
+        '''
         self._events.append(event)
 
-    def events(self) -> list:
-        return list(self._events)
+    def events(self, trace_id: str | None = None) -> list:
+        '''取出事件。给定 trace_id 时只返回该次执行产生的事件。
+
+        TODO(W2): 事件切换为 Event 模型后，按模型字段取 trace_id。
+        TODO(W4): Orchestrator 尚未调用 log_event，当前生产路径上事件列表恒为空，
+                  过滤逻辑本身已有单元测试覆盖。
+        '''
+        if trace_id is None:
+            return list(self._events)
+        return [e for e in self._events if _trace_id_of(e) == trace_id]

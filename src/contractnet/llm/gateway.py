@@ -1,9 +1,11 @@
-'''LLM 客户端 —— 所有对大模型的调用都从这里走。
+'''LLM 网关 —— 所有对大模型的调用都从这里走。
 
 为什么必须有这一层（而不是各处直接调 SDK）：
     1. 重试/超时/降级策略统一，不用每个调用点写一遍
     2. 测试时可以整体替换成假客户端（不花钱）
     3. 能统一统计 token 消耗、按模块归因
+
+⚠️ 本模块即设计文档 §5.8 的 LLMGateway，接口规格见 §6。
 '''
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ class LLMError(Exception):
     '''LLM 调用失败。'''
 
 
-class LLMClient:
+class LLMGateway:
     def __init__(self, api_key: str | None = None, base_url: str | None = None,
                  model: str | None = None) -> None:
         self.api_key = api_key or os.environ.get('CONTRACTNET_API_KEY', '')
@@ -26,7 +28,7 @@ class LLMClient:
         self.model = model or os.environ.get('CONTRACTNET_MODEL', '')
         self._client = None
 
-    def complete(self, prompt: str, **kwargs) -> str:
+    def complete(self, prompt: str, **opts) -> str:
         '''单轮补全，返回纯文本。
 
         TODO(W3): 实现。要求：
@@ -37,9 +39,10 @@ class LLMClient:
         '''
         raise NotImplementedError('W3 实现')
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None, **kwargs):
+    def chat(self, messages: list[dict], tools: list[dict] | None = None, **opts):
         '''多轮对话 + 工具定义，供 ReAct 循环使用。
 
-        TODO(W3): 实现。返回内容里要能拿到 content 和 tool_calls。
+        TODO(W3): 实现。返回内容要能拿到 content 与 tool_calls；
+                  返回类型 LLMResponse 在 W2 接口冻结时定稿。
         '''
         raise NotImplementedError('W3 实现')

@@ -28,7 +28,7 @@
 | **orchestrator**  | `core/orchestrator.py`    | 主循环、状态机、并发控制          |
 | **quality_gate**  | `core/quality_gate.py`    | 三层校验                  |
 | **conflict**      | `core/conflict.py`        | 冲突检测与消解               |
-| **llm**           | `llm/client.py`           | LLM 客户端（重试/缓存/预算）     |
+| **llm**           | `llm/gateway.py`          | LLM 网关（重试/缓存/预算）     |
 | **tools**         | `tools/sandbox.py`        | 工具执行与沙箱               |
 | **memory**        | `memory/store.py`         | 状态与成果物存储              |
 | **observability** | `observability/tracer.py` | 日志、trace、指标           |

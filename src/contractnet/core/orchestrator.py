@@ -9,28 +9,18 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 
 from contractnet.core.types import (
     Artifact,
     Contract,
     ContractConstraints,
+    RunResult,
     Task,
     TaskDAG,
     TaskStatus,
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class RunResult:
-    '''一次完整执行的结果。'''
-
-    goal: str
-    success: bool = False
-    artifacts: list[Artifact] = field(default_factory=list)
-    metrics: dict = field(default_factory=dict)
 
 
 class Orchestrator:
@@ -53,6 +43,20 @@ class Orchestrator:
 
     def register(self, agent) -> None:
         self._agents.append(agent)
+
+    def cancel(self) -> None:
+        '''请求中止本次执行，向所有在跑任务发取消信号。
+
+        TODO(W4): 并发落地时实现，需配合主循环出口与线程池 shutdown。
+        '''
+        raise NotImplementedError('W4 实现')
+
+    def status(self):
+        '''当前系统快照（各状态任务计数、在跑任务、已用预算）。
+
+        TODO(W7): 返回 SystemStatus。该类型在 W2 接口冻结时定稿。
+        '''
+        raise NotImplementedError('W7 实现')
 
     def run(self, goal: str) -> RunResult:
         '''主循环。

@@ -12,7 +12,7 @@ def test_import_all_modules():
     from contractnet.core import agent, auctioneer, conflict  # noqa: F401
     from contractnet.core import orchestrator, planner       # noqa: F401
     from contractnet.core import quality_gate, types         # noqa: F401
-    from contractnet.llm import client                       # noqa: F401
+    from contractnet.llm import gateway                      # noqa: F401
     from contractnet.memory import store                     # noqa: F401
     from contractnet.observability import tracer             # noqa: F401
     from contractnet.tools import sandbox                    # noqa: F401

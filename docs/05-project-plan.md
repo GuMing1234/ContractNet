@@ -47,7 +47,7 @@
 | **任务分解**      | **R2** | Planner                           | `core/planner.py`                                           | ⭐    |
 | **竞标仲裁**      | **R3** | Auctioneer                        | `core/auctioneer.py`                                        | ⭐    |
 | **Agent 运行时** | **R4** | Agent + ReAct                     | `core/agent.py`                                             | ⭐⭐⭐  |
-| **工具与网关**     | **R5** | Sandbox + LLMGateway + 内置工具       | `tools/sandbox.py` `llm/client.py` `tools/builtins.py`       | ⭐⭐   |
+| **工具与网关**     | **R5** | Sandbox + LLMGateway + 内置工具       | `tools/sandbox.py` `llm/gateway.py` `tools/builtins.py`       | ⭐⭐   |
 | **质量门控**      | **R6** | QualityGate                       | `core/quality_gate.py`                                      | ⭐⭐⭐  |
 | **冲突与存储**     | **R7** | Conflict + StateStore + AgentMemory | `core/conflict.py` `memory/store.py` `memory/agent_memory.py` | ⭐⭐   |
 | **观测与评估**     | **R8** | Tracer + Eval                     | `observability/` `eval/`                                    | ⭐⭐   |
