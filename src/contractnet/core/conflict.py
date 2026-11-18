@@ -13,18 +13,11 @@
 
 from __future__ import annotations
 
-from contractnet.core.types import TaskDAG, new_id
-
-
-class Conflict:
-    def __init__(self, conflict_type: str, description: str) -> None:
-        self.conflict_id = new_id('conf')
-        self.conflict_type = conflict_type
-        self.description = description
+from contractnet.core.types import Conflict, TaskDAG
 
 
 class ConflictResolver:
-    def detect(self, dag: TaskDAG, store=None) -> list:
+    def detect(self, dag: TaskDAG, store=None) -> list[Conflict]:
         '''检测冲突。返回 Conflict 列表。
 
         TODO(W6): 先做「文件写冲突」（最简也最实用），
@@ -32,9 +25,10 @@ class ConflictResolver:
         '''
         return []
 
-    def resolve(self, conflict, dag: TaskDAG):
+    def resolve(self, conflict: Conflict, dag: TaskDAG):
         '''消解冲突。返回消解策略说明。
 
-        TODO(W6): 串行化 / 重新执行下游 / 并行对比取优 / 强制终止
+        TODO(W6): 串行化 / 重新执行下游 / 并行对比取优 / 强制终止。
+                  TODO(W2): 返回类型 Resolution 在接口冻结时定稿。
         '''
         raise NotImplementedError('W6 实现')

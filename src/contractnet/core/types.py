@@ -169,3 +169,47 @@ class QualityResult(BaseModel):
     score: float | None = None       # ⚠️ 同上：没评分就是 None
     feedback: str = ''
     layer: str = ''                  # schema|semantic|impact
+
+
+# ──────────────────────────────────────────────
+# 冲突
+# ──────────────────────────────────────────────
+class ConflictType(str, Enum):
+    '''五类冲突（设计文档 §3.10）。W6 起逐类实现检测。'''
+
+    FILE_WRITE = 'file_write'                              # 两个任务写了同一文件
+    INTERFACE_MISMATCH = 'interface_mismatch'              # 函数签名对不上
+    SEMANTIC_CONTRADICTION = 'semantic_contradiction'      # 结论互相否斥
+    DEPENDENCY_VIOLATION = 'dependency_violation'          # 读到了未完成的产出
+    DEADLOCK = 'deadlock'                                  # 循环等待
+
+
+class Conflict(BaseModel):
+    '''一条冲突记录。由 ConflictResolver.detect() 产出。
+
+    ⚠️ Pydantic 模型不接受位置参数，只能用关键字构造：
+       Conflict(conflict_type=ConflictType.FILE_WRITE, description='...')
+
+    TODO(W6): conflict_type 收窄为 ConflictType。
+    '''
+
+    conflict_id: str = Field(default_factory=lambda: new_id('conf'))
+    conflict_type: str
+    description: str = ''
+
+
+# ──────────────────────────────────────────────
+# 运行结果
+# ──────────────────────────────────────────────
+class RunResult(BaseModel):
+    '''一次完整执行的结果。由 Orchestrator.run() 返回。
+
+    ⚠️ `goal` 保持必填：漏传应当报错，而不是静默返回一个空目标的结果。
+
+    ⚠️ Pydantic 模型不接受位置参数，只能用关键字构造。
+    '''
+
+    goal: str
+    success: bool = False
+    artifacts: list[Artifact] = Field(default_factory=list)
+    metrics: dict = Field(default_factory=dict)

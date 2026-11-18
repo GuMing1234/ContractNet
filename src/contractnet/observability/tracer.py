@@ -41,3 +41,10 @@ class Tracer:
             self._depth -= 1
             cost = time.perf_counter() - start
             print(f'[{self.trace_id}] {indent}◀ {name} {cost:.3f}s')
+
+    def record_metric(self, name: str, value: float, tags: dict | None = None) -> None:
+        '''记录一条数值指标，供评估阶段汇总。
+
+        TODO(W8): 接入 eval/metrics.py 的指标采集与导出。
+        '''
+        raise NotImplementedError('W8 实现')

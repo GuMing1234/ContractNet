@@ -49,7 +49,7 @@ ContractNet/
 ├── src/contractnet/
 │   ├── core/                 types / planner / auctioneer / agent /
 │   │                         orchestrator / quality_gate / conflict
-│   ├── llm/client.py         模型调用统一入口
+│   ├── llm/gateway.py        模型调用统一入口
 │   ├── tools/sandbox.py      工具沙箱
 │   ├── memory/store.py       状态与成果物存储
 │   ├── observability/        日志与链路追踪

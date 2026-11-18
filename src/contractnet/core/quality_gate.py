@@ -22,7 +22,7 @@ class QualityGate:
     def review(self, artifact: Artifact, contract: Contract) -> QualityResult:
         '''三层校验（短路）。
 
-        TODO(W3): 实现三层。
+        TODO(W5): 实现三层。
                  ⚠️ 两个必须避开的坑：
                  1. 没有裁判时，score 必须是 None，**绝对不能拿 quality_threshold 顶上**
                  2. L1 不能直接用 json.loads —— 代码/文档产物不是 JSON，会崩。
@@ -31,6 +31,6 @@ class QualityGate:
         return QualityResult(
             passed=True,
             score=None,                       # 没评分就是 None，不冒充
-            feedback='TODO(W3): 三层校验尚未实现，当前一律放行',
+            feedback='TODO(W5): 三层校验尚未实现，当前一律放行',
             layer='none',
         )

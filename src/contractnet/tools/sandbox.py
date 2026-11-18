@@ -16,11 +16,12 @@ class ToolSandbox:
     def __init__(self, workspace: str = 'workspace') -> None:
         self.workspace = workspace
 
-    def execute(self, tool_name: str, params: dict) -> str:
+    def execute(self, tool_name: str, args: dict) -> str:
         '''执行一个工具调用，返回结果字符串（或错误信息）。
 
         TODO(W6): 实现 file_read / file_write / code_run 三个工具。
                   code_run 用 subprocess.run(timeout=...)，先做土版本，
                   不要一上来想 Docker。
+                  TODO(W2): 返回类型收窄为 ToolResult；SandboxLimits 一并定稿。
         '''
         raise NotImplementedError('W6 实现')

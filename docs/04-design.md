@@ -129,7 +129,7 @@
 | **Orchestrator**     | `core/orchestrator.py`    | 主循环、状态机、并发、决策      | 各模块内部细节    |
 | **QualityGate**      | `core/quality_gate.py`    | 三层校验、结构化反馈         | 修改成果物、决定重试 |
 | **ConflictResolver** | `core/conflict.py`        | 冲突检测、消解策略          | 判断单个成果物质量  |
-| **LLMGateway**       | `llm/client.py`           | 统一模型调用、重试、缓存、预算    | 业务判断       |
+| **LLMGateway**       | `llm/gateway.py`          | 统一模型调用、重试、缓存、预算    | 业务判断       |
 | **ToolSandbox**      | `tools/sandbox.py`        | 工具执行、权限、超时、截断      | 决定调哪个工具    |
 | **BuiltinTools**     | `tools/builtins.py`       | 内置工具实现（`file_read` / `file_write` / `list_dir` / `code_run` / `test_run`） | 权限校验与超时（由 ToolSandbox 统一处理） |
 | **StateStore**       | `memory/store.py`         | 状态与成果物存取、回放        | 校验、判断、决策   |
@@ -396,6 +396,16 @@ class ConflictType(str, Enum):
     DEADLOCK            = 'deadlock'             # 循环等待
 ```
 
+**Conflict 实体**（定义在 `core/types.py`）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `conflict_id` | `str` | `conf_<12hex>` |
+| `conflict_type` | `str` | 取 `ConflictType` 的 value。W6 收窄为枚举类型 |
+| `description` | `str` | 供消解与日志使用 |
+
+`Resolution`（消解结论）在 W6 随消解策略一并定稿。
+
 > 设计约束：`interface_mismatch` 与 `semantic_contradiction` 两类冲突实现成本较高，
 > 常见做法是只实现消解分支而省略检测分支，导致这两类冲突实际无法被发现。本项目要求五类检测全部落地（见 §5.6）。
 > 我们要求 5 种检测全部落地（见 5.6）。
@@ -535,8 +545,8 @@ ready(task) ⟺ task.status == PENDING
 class Planner:
     def __init__(self, llm: LLMGateway | None = None): ...
 
-    def plan(self, goal: str, context: dict | None = None) -> TaskDAG: ...
-    def replan(self, failed_task: Task, reason: str) -> TaskDAG: ...
+    def plan(self, goal: str, context: PlanContext | None = None) -> TaskDAG: ...
+    def replan(self, failed_task: Task, reason: str) -> tuple[TaskDAG, list[str]]: ...
 ```
 
 ### 核心算法
@@ -1277,15 +1287,17 @@ class EventBus(Protocol):
 # 6. 接口规格汇总
 
 > W2 冻结后改动需全员同意。
+> 本章描述**目标接口**，不等于现有代码都已实现；各模块落地进度见 §6.2。
 
 ```python
 # ── Planner ──
-plan(goal: str, context: dict | None = None) -> TaskDAG
+plan(goal: str, context: PlanContext | None = None) -> TaskDAG
 replan(failed_task: Task, reason: str) -> tuple[TaskDAG, list[str]]
 
 # ── Auctioneer ──
 auction(contract: Contract, agents: list[BaseAgent]) -> Bid | None
 score(bid: Bid, contract: Contract) -> float
+history(contract_id: str) -> list[Bid]
 
 # ── Agent ──
 bid(contract: Contract) -> Bid | None
@@ -1294,6 +1306,7 @@ execute(contract: Contract) -> Artifact
 # ── Orchestrator ──
 run(goal: str) -> RunResult
 cancel() -> None
+status() -> SystemStatus
 
 # ── QualityGate ──
 review(artifact: Artifact, contract: Contract) -> QualityResult
@@ -1305,6 +1318,9 @@ resolve(conflict: Conflict, dag: TaskDAG) -> Resolution
 # ── ToolSandbox ──
 execute(tool_name: str, args: dict) -> ToolResult
 
+# ── BuiltinTools（无独立类，经 ToolSandbox.execute 调用）──
+file_read / file_write / list_dir / code_run / test_run
+
 # ── LLMGateway ──
 complete(prompt: str, **opts) -> str
 chat(messages: list[dict], tools=None, **opts) -> LLMResponse
@@ -1312,8 +1328,9 @@ chat(messages: list[dict], tools=None, **opts) -> LLMResponse
 # ── StateStore ──
 save_artifact(a: Artifact) -> str
 get_artifact(id: str) -> Artifact | None
+all_artifacts() -> list[Artifact]
 log_event(e: Event) -> None
-events(trace_id: str) -> list[Event]
+events(trace_id: str | None = None) -> list[Event]
 
 # ── Tracer ──
 span(name: str, **attrs) -> ContextManager
@@ -1336,9 +1353,42 @@ run(benchmark: BenchmarkTask, config: EvalConfig, repeat: int = 5) -> EvalResult
 **四条接口公约**：
 
 1. 跨模块只传 Pydantic 对象，**禁止 `dict`**
+   例外仅限**对外协议边界**（必须保持原生结构，否则无法与外部接口对接）：工具调用参数 `args`、LLM 消息 `messages`、指标标签 `tags`、模型调用的透传参数 `**opts`
 2. 所有可能阻塞的操作用统一超时（默认 30s）
 3. 失败返回 `Result`/`None` 并记日志；**系统异常才 `raise`**
 4. 任何接口的失败路径都要有测试
+
+### 尚未定义的类型（W2 冻结时定稿）
+
+`PlanContext`、`SystemStatus`、`Resolution`、`ToolResult`、`SandboxLimits`、`LLMResponse`、`Event`、`ExecutionRecord`、`AgentPerformance`、`BenchmarkTask`、`EvalConfig`、`EvalResult`
+
+> 这些类型目前只以名字出现在本章与第 5 章，尚未在 `core/types.py` 落地。
+> 接口冻结前必须逐个定稿，否则相关接口无法编写测试。
+
+---
+
+## 6.2 实现进度对照
+
+| 模块 | 文件 | 状态 | 与本章规格的差距 |
+|---|---|---|---|
+| Planner | `core/planner.py` | 骨架 | `context` 无类型标注（待 `PlanContext`）；分解为写死模板（W3）；`replan` 未实现（W5） |
+| Auctioneer | `core/auctioneer.py` | 骨架 | `auction` 未用 `score` 加权，且平分时胜负取决于 agents 顺序（W3） |
+| Agent | `core/agent.py` | 骨架 | `bid` 返回固定值；`execute` 未走 ReAct（W3） |
+| Orchestrator | `core/orchestrator.py` | 骨架 | 串行主循环；`cancel`（W4）、`status`（W7）为桩；`status` 无返回标注（待 `SystemStatus`） |
+| QualityGate | `core/quality_gate.py` | 骨架 | 一律放行，三层校验未实现（W5） |
+| ConflictResolver | `core/conflict.py` | 骨架 | `detect` 恒返回 `[]`；`resolve` 未实现（W6），返回标注待 `Resolution` |
+| ToolSandbox | `tools/sandbox.py` | 骨架 | 未实现任何工具（W6）；`__init__` 缺 `limits`；返回 `str` 待改 `ToolResult` |
+| LLMGateway | `llm/gateway.py` | 骨架 | `complete` / `chat` 均抛 `NotImplementedError`（W3）；`chat` 返回标注待 `LLMResponse` |
+| StateStore | `memory/store.py` | 可用 | 内存实现；`log_event` 仍收 `dict`（W2 改 `Event`）；生产路径暂无事件写入方（W4） |
+| Tracer | `observability/tracer.py` | 可用 | `span` 已实现；`record_metric` 为桩（W8） |
+| AgentMemory | `memory/agent_memory.py` | 未创建 | W5–W7 |
+| EventBus | `core/event_bus.py` | 未创建 | W2 随接口冻结定稿 |
+| BuiltinTools | `tools/builtins.py` | 未创建 | W3，Agent 执行依赖 |
+| EvalFramework | `eval/` | 空壳 | 目录与 `__init__.py` 已存在，无实现；W8 |
+
+> 状态含义：**可用** = 已能承担实际职责；**骨架** = 接口齐备、内部为占位实现；**空壳** = 仅有目录或空文件；**未创建** = 文件尚不存在。
+>
+> 凡「差距」列提到「无返回标注 / 待某类型」的，都是因为该类型尚未定义，清单见上一节。
 
 ---
 
@@ -1575,12 +1625,12 @@ print('ok')
 
 ## A. 待定问题（Open Questions）
 
-| # | 问题 | 需在何时决定 | 负责人 |
-|---|---|---|---|
-| Q1 | 是否接入 SQLite（还是全程内存） | W5 | R7 |
-| Q2 | 语义冲突抽样比例 | W6 | R7 |
-| Q3 | 是否做 Dashboard（还是纯 CLI 输出） | W7 | R8 |
-| Q4 | 对比基线是否包含一个现成框架 | W8 | 负责人 |
+| #   | 问题                        | 需在何时决定 | 负责人 |
+| --- | ------------------------- | ------ | --- |
+| Q1  | 是否接入 SQLite（还是全程内存）       | W5     | R7  |
+| Q2  | 语义冲突抽样比例                  | W6     | R7  |
+| Q3  | 是否做 Dashboard（还是纯 CLI 输出） | W7     | R8  |
+| Q4  | 对比基线是否包含一个现成框架            | W8     | 负责人 |
 
 ## B. 与本项目无关的技术（明确不需要）
 
