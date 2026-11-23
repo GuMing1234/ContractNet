@@ -1,0 +1,18 @@
+# CODEOWNERS —— 决定「谁的 approve 才算数」
+#
+# 配合 Rulesets 里的「Require review from Code Owners」使用。
+# 不开那条规则时，本文件只决定「自动请求谁 review」，不强制；开了才强制。
+#
+# 规则设计：
+#   · 全体成员（含负责人）的 PR，都由下面两人之一批准
+#   · 自己不能批自己 → 负责人的 PR 必须副审判，副审的 PR 必须负责人批
+#   · 其余成员之间的互相 approve 不计入（PR 会卡在 Waiting for code owners review）
+#
+# 注意：code owner 必须对该仓库有 write 权限，否则不生效。
+# 变更记录：2026-11-23 建立（负责人 宋旭涛 / 副审 夏传祥）
+
+# 全仓库默认 owner
+*                       @GuMing1234 @123xcx321
+
+# 本文件自身也归这两人所有，防止有人改 CODEOWNERS 来放宽审批
+/.github/CODEOWNERS      @GuMing1234 @123xcx321
