@@ -187,6 +187,9 @@ ToolSandbox ← Agent
 # 3. 领域模型
 
 > **W2 冻结。** 冻结后修改需要全员同意。
+>
+> **本章由 `tests/test_domain_model.py` 守护**：本章写出的每个字段，代码里必须存在；代码里有的字段，本章必须写出。
+> 改本章和改 `types.py` 必须在同一个 PR 里，否则测试会红。
 
 ## 3.1 模型关系总览
 
@@ -293,6 +296,8 @@ def update_status(self, task_id, status) -> None:
 | `deadline_steps` | `int` | 最大执行步数 |
 | `created_at` | `float` | — |
 
+**`ContractConstraints`（执行约束）**
+
 ```python
 class ContractConstraints(BaseModel):
     max_tokens: int = 5000
@@ -320,11 +325,15 @@ class ContractConstraints(BaseModel):
 ```python
 class OutputSpec(BaseModel):
     kind: Literal['json', 'python', 'text', 'binary']
-    schema: dict | None = None        # kind == 'json' 时使用
+    json_schema: dict | None = None   # kind == 'json' 时使用
     must_contain: list[str] = []      # 代码/文档必须包含的符号或标题
     min_length: int = 0
     optional_syntax_check: bool = True  # python: 用 ast.parse 验证
 ```
+
+> **W2 改名说明**：该字段原名 `schema`，与 Pydantic 内置的 `BaseModel.schema()` 重名会被遮蔽
+> （实例属性访问虽能用，但 `spec.schema()` 调用会拿到字段值而不是方法，是个隐蔽陷阱），
+> 冻结时改为 `json_schema`。
 
 ### L1 校验方式按类型分派
 
@@ -360,7 +369,10 @@ class OutputSpec(BaseModel):
 | `artifact_type` | `str` | `text`/`code`/`data`/`report` |
 | `file_path` | `str \| None` | 若落盘，相对 workspace 的路径 |
 | `quality` | `float \| None` | ⚠️ **未评分必须是 `None`**（ADR-04） |
-| `provenance` | `Provenance` | 见下（ADR-08） |
+| `created_at` | `float` | 时间戳 |
+| `provenance` | `Provenance \| None` | 见下（ADR-08）。**未归档时为 `None`**，归档时由 Orchestrator 填 |
+
+**`Provenance`（来源链）**
 
 ```python
 class Provenance(BaseModel):
@@ -385,6 +397,18 @@ class QualityResult(BaseModel):
     details: list[LayerResult] = []  # 每层结果（含短路信息）
 ```
 
+**`LayerResult`（每层一条）**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `layer` | `str` | `schema` / `semantic` / `impact` / `none` |
+| `passed` | `bool` | 该层是否通过 |
+| `score` | `float \| None` | ⚠️ 未实际评分时必须是 `None`（ADR-04） |
+| `message` | `str` | 失败原因 / 短路说明 |
+
+> 三层校验 W5 才实现，届时若各层字段差异变大（语义层要裁判理由、影响层要级联清单），
+> 按需扩展 `LayerResult`；W2 冻结只保证「过了没有 / 为什么」这两件事能记下来。
+
 ## 3.10 Conflict / Resolution
 
 ```python
@@ -406,6 +430,9 @@ class ConflictType(str, Enum):
 
 `Resolution`（消解结论）在 W6 随消解策略一并定稿。
 
+> **W2 明确**：`Resolution` **本次不冻结**。它依赖五种消解策略（串行化 / 定义方先行 / 并行对比取优 / 回滚等待 / 强制终止），
+> 策略没实现之前定形状只能靠猜。`conflict.py` 里原写「TODO(W2)」已改为 **TODO(W6)**，与本节一致。
+
 > 设计约束：`interface_mismatch` 与 `semantic_contradiction` 两类冲突实现成本较高，
 > 常见做法是只实现消解分支而省略检测分支，导致这两类冲突实际无法被发现。本项目要求五类检测全部落地（见 §5.6）。
 > 我们要求 5 种检测全部落地（见 5.6）。
@@ -413,13 +440,50 @@ class ConflictType(str, Enum):
 ## 3.11 Event（用于日志与回放）
 
 ```python
-Event = Union[
-    TaskCreated, BidReceived, TaskAwarded, AgentStarted,
-    ArtifactProduced, GatePassed, GateFailed,
-    RetryScheduled, ReplanTriggered, ConflictDetected, ConflictResolved,
-]
-# 每个事件都带：event_id / trace_id / ts / task_id / payload
+class EventType(str, Enum):
+    TASK_CREATED        = 'task_created'
+    BID_RECEIVED        = 'bid_received'
+    TASK_AWARDED        = 'task_awarded'
+    AGENT_STARTED       = 'agent_started'
+    ARTIFACT_PRODUCED   = 'artifact_produced'
+    GATE_PASSED         = 'gate_passed'
+    GATE_FAILED         = 'gate_failed'
+    RETRY_SCHEDULED     = 'retry_scheduled'
+    REPLAN_TRIGGERED    = 'replan_triggered'
+    CONFLICT_DETECTED   = 'conflict_detected'
+    CONFLICT_RESOLVED   = 'conflict_resolved'
+
+
+class Event(BaseModel):
+    event_id: str            # evt_<12hex>
+    trace_id: str
+    ts: float
+    task_id: str | None      # run 级事件（如整体完成）可为 None
+    event_type: EventType
+    payload: dict
 ```
+
+> **W2 冻结时的取舍**：11 种事件**不拆成 11 个子类**，用 `event_type` 区分。
+> 理由：回放要反序列化，单一模型 + `payload` 比拼 11 个分支简单可靠；各类型的 `payload` 结构在 W7 落库时再逐类细化。
+> `StateStore.log_event(e: Event)` / `events()` 因此有了确定类型（原先是 `dict`）。
+
+## 3.12 CapabilityProfile（Agent 能力声明）
+
+```python
+class CapabilityProfile(BaseModel):
+    agent_id: str
+    task_types: list[str] = []    # 能接的任务类型，'*' 表示通配
+    tools: list[str] = []         # 允许使用的工具名
+    base_confidence: float = 0.5  # 冷启动置信度；有历史后按成功率修正（ADR-07）
+```
+
+| 字段 | 说明 |
+|---|---|
+| `task_types` | 竞标时用于能力匹配；`'*'` 是兜底 Agent，其 `capability` 应略低于精确匹配，否则它总赢 |
+| `tools` | 工具权限的**唯一来源**：`BaseAgent` 按它过滤工具后再传给模型（见 §5.7） |
+| `base_confidence` | 冷启动值。有历史数据后改用历史成功率 + 先验（ADR-07），不用 LLM 自报 |
+
+> W3 由 R1 与 R5 一起细化（`tools` 是否需要带参数/权限级别）。当前形状对齐 `BaseAgent` 现有构造参数，保证接口不缺。
 
 ---
 

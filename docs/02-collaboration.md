@@ -76,7 +76,14 @@ git reset --hard       ❌ 改动不可恢复
 git status                                             # 有无 .env、笔记、参考实现混入
 git diff --stat                                        # 改动规模（超过 400 行考虑拆分）
 git ls-files | grep -iE "env$|key|secret|token|reference"
+python -X utf8 -m pytest -q                            # 全绿才能提交
 ```
+
+> **两个测试是文档与代码之间唯一的连接，都不许跳**：
+> - 改了 `types.py` 或 `04-design.md` 第 3 章 → **必须**跑 `tests/test_domain_model.py`（查字段）
+> - 改了模块接口（`04-design.md` 第 6 章）→ **必须**跑 `tests/test_interfaces.py`（查方法名）
+>
+> 只跑其中一个等于没验：前者看不到 §6，后者看不到 §3。
 
 ---
 

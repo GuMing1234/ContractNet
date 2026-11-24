@@ -29,6 +29,6 @@ class ConflictResolver:
         '''消解冲突。返回消解策略说明。
 
         TODO(W6): 串行化 / 重新执行下游 / 并行对比取优 / 强制终止。
-                  TODO(W2): 返回类型 Resolution 在接口冻结时定稿。
+                  TODO(W6): 返回类型 Resolution 随消解策略一并定稿（与 04-design.md §3.10 一致）。
         '''
         raise NotImplementedError('W6 实现')
