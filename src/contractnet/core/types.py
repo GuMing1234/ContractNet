@@ -8,6 +8,7 @@ from __future__ import annotations
 import time
 import uuid
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -116,6 +117,23 @@ class ContractConstraints(BaseModel):
     quality_threshold: float = 0.8
 
 
+class OutputSpec(BaseModel):
+    '''产出规格 —— L1 校验按 kind 分派（见 04-design.md §3.6、陷阱 D-04）。
+
+    ⚠️ 代码类产物不是 JSON，不能只走 `json.loads`。
+       如果只实现 json 分支，code / doc 产物的 L1 会全部变成「跳过」或「异常」，
+       等于门控第一层形同虚设。
+    '''
+
+    kind: Literal['json', 'python', 'text', 'binary']
+    # ⚠️ 原名 schema。与 Pydantic 内置的 BaseModel.schema() 重名会被遮蔽，
+    #    W2 冻结时改名为 json_schema（文档 §3.6 同步）。
+    json_schema: dict | None = None                         # kind == 'json' 时使用
+    must_contain: list[str] = Field(default_factory=list)   # 代码 / 文档必须包含的符号或标题
+    min_length: int = 0
+    optional_syntax_check: bool = True                      # python: 用 ast.parse 验证
+
+
 class Contract(BaseModel):
     '''契约 —— Agent 之间协作的协议载体。
 
@@ -129,7 +147,9 @@ class Contract(BaseModel):
     task_type: str = 'code'                          # ⚠️ 必须带上，不要丢
     description: str
     input_artifacts: list[str] = Field(default_factory=list)
-    output_schema: dict = Field(default_factory=dict)
+    output_spec: OutputSpec = Field(
+        default_factory=lambda: OutputSpec(kind='text')
+    )
     constraints: ContractConstraints = Field(default_factory=ContractConstraints)
     deadline_steps: int = 15
     created_at: float = Field(default_factory=time.time)
@@ -150,6 +170,20 @@ class Bid(BaseModel):
 # ──────────────────────────────────────────────
 # 成果物
 # ──────────────────────────────────────────────
+class Provenance(BaseModel):
+    '''成果物的来源链（ADR-08）。
+
+    ⚠️ 为什么第一步就要有它：没有 provenance，冲突检测只能做
+       「文件路径相同」这种表层判断，做不了「级联影响」和「回滚」。
+    '''
+
+    produced_by: str                                  # contract_id
+    agent_id: str
+    consumed_by: list[str] = Field(default_factory=list)        # 消费它的 contract_id 列表
+    parent_artifact_ids: list[str] = Field(default_factory=list)  # 衍生自哪些成果物
+    version: int = 1
+
+
 class Artifact(BaseModel):
     '''Agent 的产出。'''
 
@@ -160,6 +194,21 @@ class Artifact(BaseModel):
     file_path: str | None = None
     quality: float | None = None     # ⚠️ 没评分时必须是 None，不能拿阈值顶上
     created_at: float = Field(default_factory=time.time)
+    # 未归档时为 None；归档时由 Orchestrator 填（ADR-08）
+    provenance: Provenance | None = None
+
+
+class LayerResult(BaseModel):
+    '''门控单层的结果（schema / semantic / impact 各一条）。
+
+    TODO(W5): 三层的字段差异较大（语义层要裁判理由、影响层要级联清单），
+              W5 实现三层校验时再按实际需要细化；现在只保证能记录「过了没有 / 为什么」。
+    '''
+
+    layer: str                       # schema|semantic|impact|none
+    passed: bool
+    score: float | None = None       # ⚠️ 未实际评分时必须是 None（ADR-04）
+    message: str = ''                # 失败原因 / 短路说明
 
 
 class QualityResult(BaseModel):
@@ -169,6 +218,7 @@ class QualityResult(BaseModel):
     score: float | None = None       # ⚠️ 同上：没评分就是 None
     feedback: str = ''
     layer: str = ''                  # schema|semantic|impact
+    details: list[LayerResult] = Field(default_factory=list)   # 每层结果（含短路信息）
 
 
 # ──────────────────────────────────────────────
@@ -213,3 +263,54 @@ class RunResult(BaseModel):
     success: bool = False
     artifacts: list[Artifact] = Field(default_factory=list)
     metrics: dict = Field(default_factory=dict)
+
+
+# ──────────────────────────────────────────────
+# 事件（日志与回放）
+# ──────────────────────────────────────────────
+class EventType(str, Enum):
+    '''11 种事件（设计文档 §3.11）。'''
+
+    TASK_CREATED = 'task_created'
+    BID_RECEIVED = 'bid_received'
+    TASK_AWARDED = 'task_awarded'
+    AGENT_STARTED = 'agent_started'
+    ARTIFACT_PRODUCED = 'artifact_produced'
+    GATE_PASSED = 'gate_passed'
+    GATE_FAILED = 'gate_failed'
+    RETRY_SCHEDULED = 'retry_scheduled'
+    REPLAN_TRIGGERED = 'replan_triggered'
+    CONFLICT_DETECTED = 'conflict_detected'
+    CONFLICT_RESOLVED = 'conflict_resolved'
+
+
+class Event(BaseModel):
+    '''一条事件。`StateStore.log_event` / `events()` 用的就是它。
+
+    ⚠️ W2 冻结时的取舍：11 种事件**不拆成 11 个子类**，用 `event_type` 区分。
+       理由：回放要反序列化，单一模型 + payload 比拼 11 个分支简单可靠；
+       各类型的 payload 结构在 W7 落库时再逐类细化。
+    '''
+
+    event_id: str = Field(default_factory=lambda: new_id('evt'))
+    trace_id: str = ''
+    ts: float = Field(default_factory=time.time)
+    task_id: str | None = None       # run 级事件（如整体完成）可为 None
+    event_type: EventType
+    payload: dict = Field(default_factory=dict)
+
+
+# ──────────────────────────────────────────────
+# Agent 能力画像
+# ──────────────────────────────────────────────
+class CapabilityProfile(BaseModel):
+    '''Agent 的能力声明。竞标评分与工具权限都读它（见 04-design.md §5.7）。
+
+    TODO(W3): 待 R5 确认字段（tools 是给 `list[str]` 还是带参数的 dict）。
+              现在先按 `BaseAgent` 现有构造参数定形，保证接口不缺。
+    '''
+
+    agent_id: str
+    task_types: list[str] = Field(default_factory=list)   # 能接的任务类型，'*' 表示通配
+    tools: list[str] = Field(default_factory=list)        # 允许使用的工具名
+    base_confidence: float = 0.5                          # 冷启动置信度（ADR-07 用历史成功率兜底）
