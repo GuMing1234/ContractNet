@@ -1250,6 +1250,166 @@ class BenchmarkTask(BaseModel):
 > **强制要求**：`success_criteria` 中不得出现「结论有意义」「表述清晰」这类无法程序化的条目。
 > 确需人工判断的，必须移入 `needs_human_label`。
 
+> **W2 定稿**：上方结构是最小示意。定稿在它基础上补 `benchmark_id`（报告外键）与 `optimal_steps`（步骤效率的分母），
+> 并明确 `EvalConfig` / `EvalResult`（§6 尚未定义清单中的另外两个）。
+> 本节只定字段，**不改 `core/types.py`**（由 R1 统稿合入）。
+
+### 三个类型总览（谁生产、谁消费）
+
+| 类型 | 生产方 | 消费方 |
+|---|---|---|
+| `BenchmarkTask` | R8 手工撰写，存于 `eval/benchmarks/__init__.py` 的 `BENCHMARKS` | `runner.run()`、报告生成器 |
+| `EvalConfig` | 实验者（R8）在实验脚本里显式构造 | `runner.run()`、对比表 |
+| `EvalResult` | `eval/runner.py` 的 `run()`（唯一生产点） | 报告生成器（JSON / Markdown）、W8 对比表 |
+| `MetricStat` | `runner.run()` 跨重复轮汇总时 | 报告生成器 |
+
+> `MetricStat` 是为满足「中位数 + 范围」拆出的支撑类型（理由见本节末尾），不属三个主类型，
+> 但它出现在 `EvalResult.metrics` 的元素类型里，必须一起定，否则 `EvalResult` 没法落地。
+
+#### BenchmarkTask（基准任务定义）
+
+「一道题」的完整定义。人工撰写、一次固定；改它等于换数据集，所有历史报告的口径随之失效。
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `benchmark_id` | `str` | 是 | — | 报告外键，取 §13.1 的编号（`B1`/`B2`/`B3`）；同一编号不得复用 |
+| `name` | `str` | 是 | — | 人读名称，如「Todo API 生成」 |
+| `goal` | `str` | 是 | — | 原样交给 `Orchestrator.run(goal)`，不加工、不补充提示词 |
+| `difficulty` | `Literal['easy', 'medium', 'hard']` | 是 | — | 难度分层；报告按难度分组，避免「只挑简单题」涨分 |
+| `success_criteria` | `dict` | 是 | — | 可程序化判据（键 = 判据名，值 = 阈值/期望），由判定器逐条执行 |
+| `needs_human_label` | `list[str]` | 否 | `[]` | 无法程序化判定的项；非空时须人工标注并记录标注人，否则该基准不计入对比 |
+| `optimal_steps` | `int` | 是 | — | 人工预设的最优步骤数，作 `step_efficiency` 的分母（§5.12 指标表的「benchmark 预设」） |
+
+**校验约束**：
+
+```python
+benchmark_id: str = Field(min_length=1)
+difficulty: Literal['easy', 'medium', 'hard']
+success_criteria: dict = Field(min_length=1)   # 空判据 = 永远通过，必须拒
+needs_human_label: list[str] = Field(default_factory=list)
+optimal_steps: int = Field(gt=0)               # 为 0 会让步骤效率除零
+```
+
+**不变量**：
+
+- `success_criteria` 非空，且每条都能落到一条可执行判定；出现「有意义 / 清晰 / 合理 / 完整」这类主观词，由校验器拒绝（对应本节测试点第 4 条）。
+- 判据只能引用产物与测试结果（文件存在、测试退出码、端点能否 import），不得引用「评语」。
+- `optimal_steps` 与 `success_criteria` 必须来自同一份人工预演；改判据就要重估 `optimal_steps`，两者不能分开漂移。
+
+**生产 / 消费**：由 R8 在 `eval/benchmarks/__init__.py` 的 `BENCHMARKS: dict[str, BenchmarkTask]` 中手工生产（W8 至少 3 个，难度覆盖 easy / medium / hard）。消费方只有两个：`runner.run()` 用它取 `goal` 去跑、用 `success_criteria` 判成功、用 `optimal_steps` 算步骤效率；报告生成器用 `benchmark_id` 做列名与外键。系统运行时其余模块不感知此类型——它是评估层的输入，不进 `Contract`。
+
+#### EvalConfig（实验配置）
+
+一次实验的「旋钮」。只放会改变实验结果的参数；密钥、Base URL 属于环境（§11），不进配置，否则快照里会带出密钥。
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `config_id` | `str` | 是 | — | 配置标识，即报告 JSON 的 `config`（如 `contractnet_v1` / `single_agent_baseline`），对比表的列名 |
+| `model` | `str` | 否 | `'deepseek-chat'` | 执行模型；与 §11 `CONTRACTNET_MODEL` 同义 |
+| `judge_model` | `str` | 否 | `''` | 裁判模型；空串 = 与 `model` 相同（§11 强烈建议不同） |
+| `max_concurrent` | `int` | 否 | `4` | 并发上限；与 ADR-01 线程池、§11 默认值一致 |
+| `max_tokens` | `int` | 否 | `5000` | 每任务 token 上限，成本兜底 |
+| `max_rounds` | `int` | 否 | `200` | 全局步数上限，防不收敛时跑飞 |
+| `replay` | `bool` | 否 | `False` | 回放模式：用录制数据，不发真实请求 |
+| `budget_cny` | `float \| None` | 否 | `None` | 预算上限（元）；`None` = 不设，超限即中止 |
+
+**校验约束**：
+
+```python
+config_id: str = Field(min_length=1)
+max_concurrent: int = Field(default=4, ge=1)
+max_tokens: int = Field(default=5000, gt=0)
+max_rounds: int = Field(default=200, gt=0)
+budget_cny: float | None = Field(default=None, ge=0)
+```
+
+**不变量**：
+
+- 同一次对比中 `config_id` 互不相同；基准互相比较时以它作列。
+- 一个 `config_id` 一经出过报告就不可改值，只能新增一个 id——否则两张历史表挂着同一个名字、口径却不同。
+- 不设 `temperature` / `top_p`：§11 配置表无此项，本期由网关默认值固定；W8 若证明 5 次重复抖动过大，再走 RFC 加字段，不在冻结后偷偷加。
+- 不含 `api_key` / `base_url`：密钥与环境不进报告快照。
+
+**生产 / 消费**：由实验者（R8）在实验脚本里显式构造（一个基线一个 `config_id`）。消费方是 `runner.run()`：它按 `max_concurrent` 起线程池、按 `max_rounds` 设上限，并把**实际生效值**冻结进 `EvalResult.config_snapshot`；对比表生成器拿 `config_id` 当列名。配置对象本身不被复制进报告。
+
+#### EvalResult（runner 输出）
+
+一次「基准 × 配置 × N 次重复」的汇总，含中位数 / 范围与配置快照，是报告 JSON 的结构化来源。
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `benchmark_id` | `str` | 是 | — | 本次跑的基准，外键指向 `BenchmarkTask.benchmark_id` |
+| `config_id` | `str` | 是 | — | 本次用的配置，外键指向 `EvalConfig.config_id` |
+| `repeat` | `int` | 是 | — | 实际完成的重复轮数（计划 5 轮；失败轮进 `failures`，不靠重跑凑数） |
+| `metrics` | `dict[str, MetricStat]` | 是 | — | 指标名 → 中位数 / 最小值 / 最大值 / 样本数 |
+| `config_snapshot` | `dict` | 是 | — | 报告证据：`model` / `max_concurrent` / `commit` / 运行环境，用于复现 |
+| `failures` | `list[str]` | 否 | `[]` | 未完成的重复轮及原因（如「第 3 轮 LLM 超时」） |
+| `started_at` | `float` | 否 | `time.time()` | 开始时间戳 |
+| `duration_s` | `float` | 否 | `0.0` | 整轮墙钟耗时（秒），只作运维参考，不进指标对比 |
+
+**校验约束**：
+
+```python
+benchmark_id: str = Field(min_length=1)
+config_id: str = Field(min_length=1)
+repeat: int = Field(ge=1)
+metrics: dict[str, MetricStat] = Field(default_factory=dict)
+config_snapshot: dict = Field(default_factory=dict)
+failures: list[str] = Field(default_factory=list)
+duration_s: float = Field(default=0.0, ge=0)
+```
+
+**`metrics` 必含的键**（缺一个都可以被单指标刷分，§13.3）：
+
+| 键 | 含义 | 单位 |
+|---|---|---|
+| `success_rate` | 任务完成率 = DONE 数 / 总任务数 | 0–1 |
+| `first_pass_rate` | 首次通过率 = 一次 Gate 通过数 / 总任务数 | 0–1 |
+| `step_efficiency` | 步骤效率 = 实际总步数 / `optimal_steps`；1.0 为最优 | 比值 |
+| `tokens_per_task` | 总 token / 完成任务数 | token |
+| `duration_ms` | 每任务平均耗时 | 毫秒 |
+| `replan_rate` | 重规划率 = 触发 REPLANNED 的任务数 / 总任务数 | 0–1 |
+| `conflict_detection_rate` | 冲突检出率 = 检出冲突数 / 注入冲突数 | 0–1 |
+
+> ⚠️ **口径待确认（已同步给负责人）**：§13.3 要求「耗时」，而 §5.12 指标表没有这一项。
+> 本定稿按 §13.3 补 `duration_ms`，与 `replan_rate` / `conflict_detection_rate` 一起作为扩展键。
+> 若负责人判定本期只报五项，删掉后三个键即可，**类型形状不变**。
+
+**不变量**：
+
+- `metrics` 的值一律是 `MetricStat`；**不允许**把均值塞进 `median`，也不允许只报均值不报范围。
+- 某指标一轮有效样本都没有时，该键**不出现**在 `metrics` 里（而不是写 `0`），原因记入 `failures`——`0` 与「没测到」必须可分（同 ADR-04 的取值原则）。
+- `config_snapshot` 由 runner 在**运行时**从实际生效配置与 `git rev-parse HEAD` 生成，不得回抄 `EvalConfig` 的字面值；否则「报告无法复现」这条失效模式拦不住。
+- 单轮异常不 `raise`（§6 公约 3）：记入 `failures` 继续跑完剩余轮次；只有「基准或配置本身非法」才抛。
+
+**生产 / 消费**：唯一生产点是 `eval/runner.py` 的 `run()`。消费方是报告生成器（JSON 与 Markdown 双份，字段与 §5.12 报告结构一一对应）与 W8 对比表；`Tracer` / `Orchestrator` 不消费它。`metrics.py` 不生产它——`metrics.py` 是纯函数，只算单轮的 `float`，汇总成 `MetricStat` 是 runner 的职责。
+
+#### MetricStat（支撑类型）
+
+为什么单独拆：报告要求「中位数 + 范围」，且必须能看出样本数。若用 `dict[str, float]`，`median` / `min` / `max` 三个键散落各处、拼错不报错，违反 §6 公约第 1 条。
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `median` | `float` | 是 | — | 中位数（报告主值） |
+| `min` | `float` | 是 | — | 最小值（范围下界） |
+| `max` | `float` | 是 | — | 最大值（范围上界） |
+| `n` | `int` | 是 | — | 参与统计的样本数（≤ `repeat`） |
+
+**校验约束**：
+
+```python
+n: int = Field(ge=1)               # 没有样本就不该有这条统计
+# median / min / max 为必填 float
+```
+
+**不变量**：
+
+- `min ≤ median ≤ max`；`n ≥ 1`；`n <= EvalResult.repeat`。
+- `n < repeat` 时 `EvalResult.failures` 必须能解释缺口，否则等于悄悄丢样本。
+- JSON 严格按 §5.12 的形状只输出 `{median, min, max}`；`n` 只出现在 Markdown 报告的脚注，不改动已公布的报告结构。
+
+**生产 / 消费**：由 `runner.run()` 在跨重复轮汇总时生产；报告生成器序列化消费。`metrics.py` 不产出 `MetricStat`（它只返回单轮 `float`）。
+
 ### 指标计算规格（`metrics.py`）
 
 | 指标 | 计算式 | 数据来源 |
