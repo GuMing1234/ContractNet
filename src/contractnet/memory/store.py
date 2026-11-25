@@ -33,7 +33,7 @@ class StateStore:
     def all_artifacts(self) -> list:
         return list(self._artifacts.values())
 
-    def log_event(self, event: dict) -> None:
+    def log_event(self, event: "Event") -> None:
         '''记录事件（用于回放）。
 
         TODO(W2): 参数类型改为 Event。
