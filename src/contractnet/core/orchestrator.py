@@ -22,6 +22,11 @@ from contractnet.core.types import (
 
 logger = logging.getLogger(__name__)
 
+# 并发参数（§2.5）：默认值与设计文档保持一致。
+# W4 落地线程池时才真正使用；本期只做常量化与测试（TASKS 2.5）。
+DEFAULT_MAX_CONCURRENT = 4
+DEFAULT_TASK_TIMEOUT_SECONDS = 180
+
 
 class Orchestrator:
     def __init__(
@@ -31,7 +36,7 @@ class Orchestrator:
         quality_gate,
         conflict_resolver=None,
         store=None,
-        max_concurrent: int = 4,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
     ) -> None:
         self.planner = planner
         self.auctioneer = auctioneer
