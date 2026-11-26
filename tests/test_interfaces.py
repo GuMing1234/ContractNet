@@ -40,6 +40,9 @@ MODULES: dict[str, tuple[str, str | None]] = {
     'EvalFramework': ('eval.runner', None),
 }
 
+# 已知未创建的模块白名单：创建后必须从集合移除，否则这里会红。
+EXPECTED_UNCREATED = {'AgentMemory', 'BuiltinTools', 'EvalFramework'}
+
 
 def _parse_chapter6() -> dict[str, list[str]]:
     '''从设计文档第 6 章解析出 {模块名: [接口名]}。'''
@@ -98,6 +101,10 @@ def test_design_chapter6_matches_code():
             if not hasattr(target, method):
                 missing.append(f'{module_name}.{method}')
 
+    assert set(skipped) == EXPECTED_UNCREATED, (
+        f'未创建模块与白名单不一致：多出 {set(skipped) - EXPECTED_UNCREATED}，'
+        f'缺少 {EXPECTED_UNCREATED - set(skipped)}（创建模块后请更新白名单）'
+    )
     assert not missing, f'文档有、代码无：{missing}（未创建模块已跳过：{skipped}）'
 
 
