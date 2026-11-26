@@ -15,6 +15,7 @@ from contractnet.core.types import (
     Contract,
     ContractConstraints,
     RunResult,
+    SystemStatus,
     Task,
     TaskDAG,
     TaskStatus,
@@ -56,7 +57,7 @@ class Orchestrator:
         '''
         raise NotImplementedError('W4 实现')
 
-    def status(self):
+    def status(self) -> SystemStatus:
         '''当前系统快照（各状态任务计数、在跑任务、已用预算）。
 
         TODO(W7): 返回 SystemStatus。该类型在 W2 接口冻结时定稿。
