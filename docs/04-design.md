@@ -1192,7 +1192,7 @@ list_max_depth: int = Field(default=3, ge=0)
 |---|---|---|
 | `file_read` | 路径必须在 workspace 内 | 单次 ≤ 100KB |
 | `file_write` | 同上 | 单次 ≤ 1MB |
-| `code_run` | `subprocess`，临时目录 cwd | timeout 30s，输出截断 10KB |
+| `code_run` | `subprocess`，临时目录 cwd | timeout 30s，输出截断 10,000 字符 |
 | `test_run` | 同 code_run | timeout 120s |
 | `list_dir` | workspace 内 | 深度 ≤ 3 |
 
@@ -1205,7 +1205,7 @@ list_max_depth: int = Field(default=3, ge=0)
 | `file_read` | `path: str` | 文件内容（≤100KB） | `Error: 路径越界` / `Error: 文件不存在` |
 | `file_write` | `path: str, content: str` | `OK: 已写入 N 字节` | `Error: 路径越界` / `Error: 写入失败` |
 | `list_dir` | `path: str` | 每行一个条目 | `Error: 路径越界` |
-| `code_run` | `code: str, language: str` | stdout + stderr（≤10KB） | `Error: 超时` / `Error: 非零退出 N` |
+| `code_run` | `code: str, language: str` | stdout + stderr（≤10,000 字符） | `Error: 超时` / `Error: 非零退出 N` |
 | `test_run` | `target: str` | 测试摘要（通过/失败数） | `Error: 超时` / `Error: 用例失败` |
 
 **三条统一约定**：
@@ -1271,7 +1271,7 @@ class LLMGateway:
 
 **约定**：
 
-- 本期只支持 function calling，`type` 固定为 `function`，不单独建字段；`raw_message` 保留原始结构。
+- 本期只支持 function calling，`type` 固定为 `function`，不单独建字段；原始消息见 `LLMResponse.raw_message`。
 - `args_error` 非空时，Agent 不应执行该工具，而应把错误作为 tool 结果回填给模型。
 
 **生产/消费**：由 `LLMGateway.chat()` 解析供应商响应时生产，随 `LLMResponse` 被 ReAct 循环消费。
@@ -1890,7 +1890,7 @@ run(benchmark: BenchmarkTask, config: EvalConfig, repeat: int = 5) -> EvalResult
 `Resolution`
 
 > 除 `Resolution`（延 W6）外，W2 的 12 个类型已全部落 `core/types.py`。
-> 本轮新增支撑类型：`ToolCall`（`LLMResponse.tool_calls` 的元素，字段见 `types.py`，§5.8 文档随张哲闻 PR 合并）、`MetricStat`（`EvalResult.metrics` 的元素，见 §5.12），两者已登记。
+> 本轮新增支撑类型：`ToolCall`（`LLMResponse.tool_calls` 的元素，字段见 `types.py`，§5.8 文档已合并（PR #15））、`MetricStat`（`EvalResult.metrics` 的元素，见 §5.12），两者已登记。
 
 ---
 
