@@ -248,13 +248,55 @@ TERMINAL_STATUSES = frozenset({DONE, FAILED, REPLANNED, IMPOSSIBLE})
 
 | 当前 | 允许转到 | 触发者 |
 |---|---|---|
-| PENDING | BIDDING, IMPOSSIBLE | Orchestrator |
-| BIDDING | RUNNING, IMPOSSIBLE, PENDING | Orchestrator |
+| PENDING | BIDDING | Orchestrator |
+| BIDDING | RUNNING, PENDING（首次无人竞标，放宽后重发）, IMPOSSIBLE（放宽后仍无人） | Orchestrator |
 | RUNNING | REVIEWING, FAILED | Orchestrator |
-| REVIEWING | DONE, PENDING（重试）, REPLANNED（重试耗尽）, FAILED | Orchestrator |
+| REVIEWING | DONE, PENDING（重试）, REPLANNED（重规划完成，已被子任务替代）, FAILED（重规划失败 / 不可恢复） | Orchestrator |
 | DONE / FAILED / REPLANNED / IMPOSSIBLE | **（终态，不可转出）** | — |
 
 **违反此表的转移视为 bug**，测试中应有断言。
+
+### 状态转移图
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+
+    PENDING --> BIDDING : 开始竞标
+
+    BIDDING --> RUNNING : 中标
+    BIDDING --> PENDING : 首次无人竞标，放宽后重发
+    BIDDING --> IMPOSSIBLE : 放宽后仍无人
+
+    RUNNING --> REVIEWING : 产出成果物
+    RUNNING --> FAILED : 执行异常
+
+    REVIEWING --> DONE : 门控通过
+    REVIEWING --> PENDING : 不通过，重试未耗尽
+    REVIEWING --> REPLANNED : 重规划完成，已被替代
+    REVIEWING --> FAILED : 重规划失败 / 不可恢复
+
+    DONE --> [*]
+    FAILED --> [*]
+    REPLANNED --> [*]
+    IMPOSSIBLE --> [*]
+
+    note left of PENDING
+        只有 Orchestrator 能写 Task.status
+        （ADR-02）
+    end note
+
+    note right of REPLANNED
+        TERMINAL_STATUSES：
+        DONE / FAILED / REPLANNED / IMPOSSIBLE
+        漏掉任意一个 → 主循环死循环（D-05）
+        重试耗尽只触发重规划；
+        新子任务创建并改接下游后才置 REPLANNED（D-06）；
+        重规划失败 → FAILED。
+    end note
+```
+
+> 该图与上表逐条对应；终态由 `TERMINAL_STATUSES` 判定，漏掉任意一个主循环都无法退出（D-05）。
 
 ## 3.4 TaskDAG
 
@@ -496,11 +538,12 @@ T+0      CLI 接收目标
 T+50     Planner 分解（LLM 1 次调用，2~5s）
 T+3s     DAG 就绪 → 取 ready_tasks
 T+3s     对每个 ready task：造 Contract → 广播 → 收 Bid → 仲裁
+         首次无人竞标 → 放宽约束后重发；仍无人 → IMPOSSIBLE
 T+3s     授标 → 提交 Executor（线程池）
 T+3s~    Agent 执行（ReAct 循环，每步 1 次 LLM 调用）
 T+...    成果物 → QualityGate（L1 本地 / L2 LLM 裁判 2s / L3 比对）
          通过 → 归档，Task=DONE
-         不通过 → retry_count++ ；< max 则回 PENDING；否则重规划
+         不通过 → retry_count++ ；< max 则回 PENDING；否则触发重规划（完成后置 REPLANNED；失败置 FAILED）
 T+...    每轮结束：冲突检测（增量）
 T+...    全部终态 → 合并结果 → 输出
 ```
@@ -508,11 +551,87 @@ T+...    全部终态 → 合并结果 → 输出
 > ⚠️ **时间直觉**：一次真实执行是 **分钟级**（不是秒级）。
 > 所以任何"在主循环里同步调用 LLM"的写法都会让系统卡死（ADR-09）。
 
+### 时序图
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI
+    participant O as Orchestrator
+    participant PL as Planner
+    participant AU as Auctioneer
+    participant EX as 线程池
+    participant AG as Agent
+    participant G as QualityGate
+    participant CR as ConflictResolver
+
+    CLI->>O: run(goal)
+    O->>PL: plan(goal, context)
+    PL-->>O: TaskDAG 〔1 次 LLM，2~5s〕
+
+    loop 直到 dag.all_terminal()
+        O->>O: ready_tasks()：PENDING 且依赖全 DONE
+
+        alt 有就绪任务
+            loop 每个就绪任务
+                O->>O: 造 Contract（task_type 必带）
+                O->>O: BIDDING
+                O->>AU: auction(contract, agents)
+                AU-->>O: 中标 Bid / None 〔竞标 0 次 LLM，ADR-11〕
+                alt 无人竞标
+                    alt 首次（未放宽）
+                        O->>O: PENDING（放宽约束后重发）
+                    else 放宽后仍无人
+                        O->>O: IMPOSSIBLE
+                    end
+                else 中标
+                    O->>O: RUNNING
+                    O-)EX: submit(execute)〔不阻塞〕
+                    EX->>AG: execute(contract)〔ReAct，每步 1 次 LLM〕
+                    AG-->>EX: Artifact
+                    O->>O: REVIEWING
+                    EX-)G: review(artifact, contract)〔异步线程，ADR-09〕
+                    Note over G: L1 格式（0 LLM）<br/>L2 裁判（1 次 LLM，约 2s）<br/>L3 影响（0 LLM）
+                    G--)EX: QualityResult
+                    EX--)O: 完成结果
+                    alt 门控通过
+                        O->>O: DONE
+                    else 不通过且 retry_count < max_retries
+                        O->>O: retry_count++ → PENDING
+                    else 重试耗尽
+                        O->>O: 触发重规划
+                        alt 重规划成功
+                            O->>O: REPLANNED（下游改接新叶子）
+                        else 重规划失败
+                            O->>O: FAILED
+                        end
+                    end
+                end
+            end
+            O->>CR: detect(dag, store)〔每轮增量〕
+            CR-->>O: Conflict[]
+        else 无就绪任务
+            O->>CR: detect(dag, store)
+            CR-->>O: Conflict[]
+            alt 有冲突
+                O->>CR: resolve(conflict, dag)
+            else 无冲突且图未完成
+                Note over O: stalled：warning + 返回部分结果
+            end
+        end
+    end
+
+    O-->>CLI: RunResult
+```
+
+> Gate 用异步箭头标出（ADR-09）；主循环只负责派发与收结果，全程不同步调用 LLM。
+
 ## 4.2 主循环伪代码
 
 ```python
 def run(goal):
     dag = planner.plan(goal)                  # 1 次 LLM
+    relaxed: set[str] = set()                 # 无人竞标只放宽重发一次；不写 Task 字段
 
     while not dag.all_terminal():             # ← 用 all_terminal，不是 all_done
         ready = dag.ready_tasks()
@@ -528,11 +647,18 @@ def run(goal):
         # 派发：不阻塞
         inflight = []
         for task in ready:
-            contract = contracts.create(task)
+            # relaxed 时放宽 max_steps / max_tokens，不动 quality_threshold
+            contract = contracts.create(task, relaxed=task.id in relaxed)
             dag.update_status(task.id, BIDDING)
             winner = auctioneer.auction(contract, agents, busy_set)
             if winner is None:
-                dag.update_status(task.id, IMPOSSIBLE); continue
+                if task.id in relaxed:
+                    dag.update_status(task.id, IMPOSSIBLE)
+                else:
+                    relaxed.add(task.id)
+                    dag.update_status(task.id, PENDING)  # 下一轮放宽约束重发
+                continue
+            relaxed.discard(task.id)              # 中标后清掉放宽标记，后续重试重新计算
             dag.update_status(task.id, RUNNING)
             inflight.append(executor.submit(agent_execute, contract, winner))
 
@@ -581,7 +707,7 @@ ready(task) ⟺ task.status == PENDING
 | **配置错误**   | 401 无权限、404 模型不存在                   | **立即失败**，不重试，报错退出      | 否          |
 | **产出不合格**  | Schema 不通过、语义不达标                    | 重试（带结构化反馈）             | **是**      |
 | **执行超时**   | Agent 超过 deadline_steps / wall time | 重试（放宽约束）或重规划           | **是**      |
-| **无人竞标**   | 无 Agent 匹配                          | 放宽资源约束后重发一轮            | 否          |
+| **无人竞标** | 无 Agent 匹配 | 首次放宽约束后重发一轮；仍无人 → IMPOSSIBLE | 否 |
 | **依赖永不满足** | 上游 REPLANNED 但未改接                   | 视为 stalled             | —          |
 | **代码 bug** | `KeyError`、`AttributeError`         | **不吞**，向上抛，记 error     | 否          |
 
@@ -696,7 +822,9 @@ def replan(self, failed, reason):
 | 广播契约给可用 Agent | Agent 是否出价 |
 | 收集、校验 Bid | 执行 |
 | 综合评分并授标 | 失败处理 |
-| 无竞标时的重发策略 | — |
+| 无竞标时的诊断与放宽建议（重发由 Orchestrator 执行） | — |
+
+> 无竞标时 Auctioneer 只返回 `None` 并给出原因/放宽建议；Contract 的放宽与重新广播由 Orchestrator 执行（Task 状态只能由 Orchestrator 写，ADR-02）。
 
 ### 接口
 
@@ -827,6 +955,25 @@ class Orchestrator:
     def cancel(self) -> None: ...
     def status(self) -> SystemStatus: ...
 ```
+
+### 配套类型：SystemStatus
+
+`status()` 的返回快照。字段对应 `Orchestrator.status()` docstring 承诺的三件事：
+各状态任务计数（`task_counts`）、在跑任务（`inflight_task_ids`）、已用预算（`used_tokens`）。
+
+与 `RunResult` 的区别：`RunResult` 是执行结束后的最终结果，`SystemStatus` 是运行中的实时快照。
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `running` | `bool` | 是 | — | 主循环是否正在执行；唯一必填字段 |
+| `goal` | `str \| None` | 否 | `None` | 当前执行目标；空闲时为 `None` |
+| `trace_id` | `str \| None` | 否 | `None` | 当前 trace；空闲时为 `None` |
+| `task_counts` | `dict[str, int]` | 否 | 8 个状态全为 0 | 各状态任务数；键为 `TaskStatus` 的值 |
+| `inflight_task_ids` | `list[str]` | 否 | `[]` | `RUNNING` + `REVIEWING`，不含 `PENDING` / `BIDDING` |
+| `busy_agent_ids` | `list[str]` | 否 | `[]` | 当前 `is_busy=True` 的 Agent id |
+| `used_tokens` | `int \| None` | 否 | `None` | 已用 token 合计；`None` 表示网关未报告，不能当 0 |
+
+**口径**：`inflight_task_ids` 含 `REVIEWING`（ADR-09 Gate 异步，排查卡死需具体 id）；`busy_agent_ids` 与它不是同一件事（Agent 在 `execute()` 返回后释放）；展示层判断未知须用 `is None`（JS 中 `=== null`）。
 
 ### 核心算法
 
@@ -1045,7 +1192,7 @@ list_max_depth: int = Field(default=3, ge=0)
 |---|---|---|
 | `file_read` | 路径必须在 workspace 内 | 单次 ≤ 100KB |
 | `file_write` | 同上 | 单次 ≤ 1MB |
-| `code_run` | `subprocess`，临时目录 cwd | timeout 30s，输出截断 10KB |
+| `code_run` | `subprocess`，临时目录 cwd | timeout 30s，输出截断 10,000 字符 |
 | `test_run` | 同 code_run | timeout 120s |
 | `list_dir` | workspace 内 | 深度 ≤ 3 |
 
@@ -1058,7 +1205,7 @@ list_max_depth: int = Field(default=3, ge=0)
 | `file_read` | `path: str` | 文件内容（≤100KB） | `Error: 路径越界` / `Error: 文件不存在` |
 | `file_write` | `path: str, content: str` | `OK: 已写入 N 字节` | `Error: 路径越界` / `Error: 写入失败` |
 | `list_dir` | `path: str` | 每行一个条目 | `Error: 路径越界` |
-| `code_run` | `code: str, language: str` | stdout + stderr（≤10KB） | `Error: 超时` / `Error: 非零退出 N` |
+| `code_run` | `code: str, language: str` | stdout + stderr（≤10,000 字符） | `Error: 超时` / `Error: 非零退出 N` |
 | `test_run` | `target: str` | 测试摘要（通过/失败数） | `Error: 超时` / `Error: 用例失败` |
 
 **三条统一约定**：
@@ -1124,7 +1271,7 @@ class LLMGateway:
 
 **约定**：
 
-- 本期只支持 function calling，`type` 固定为 `function`，不单独建字段；`raw_message` 保留原始结构。
+- 本期只支持 function calling，`type` 固定为 `function`，不单独建字段；原始消息见 `LLMResponse.raw_message`。
 - `args_error` 非空时，Agent 不应执行该工具，而应把错误作为 tool 结果回填给模型。
 
 **生产/消费**：由 `LLMGateway.chat()` 解析供应商响应时生产，随 `LLMResponse` 被 ReAct 循环消费。
@@ -1273,21 +1420,55 @@ class AgentMemory:
 
 | 结构 | 关键字段 | 用途 |
 |---|---|---|
-| `ExecutionRecord` | task_id / contract_id / task_type / steps / tokens / **success** / **quality** / feedback | 原始执行记录 |
-| `AgentPerformance` | total_tasks / success_rate / avg_cost / avg_steps / avg_quality | 能力画像，供竞标评分使用 |
+| `ExecutionRecord` | 见下方「ExecutionRecord 字段」 | 原始执行记录 |
+| `AgentPerformance` | 见下方「AgentPerformance 字段」 | 能力画像，供竞标评分使用 |
 | `FailurePattern` | task_type / common_feedback / occurrence_count | 同类失败累计 ≥2 次时提炼，注入后续 prompt |
 | `SuccessTemplate` | task_type / description / steps / quality | 成功案例，按 quality 排序取最优 |
+
+#### ExecutionRecord 字段
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `record_id` | `str` | 否 | `default_factory=lambda: new_id('rec')` | 唯一标识 |
+| `task_id` | `str` | 是 | — | 关联的任务 ID |
+| `agent_id` | `str` | 是 | — | 执行该任务的 Agent ID |
+| `contract_id` | `str` | 是 | — | 关联的契约 ID |
+| `task_type` | `str` | 是 | — | 任务类型；`AgentMemory` 的聚合键 |
+| `success` | `bool \| None` | 否 | `None` | 是否成功；`None` 表示门控尚未回写 |
+| `quality` | `float \| None` | 否 | `None` | 质量得分；未评分时为 `None`（ADR-04） |
+| `steps` | `int` | 否 | `0` | 消耗的执行步数 |
+| `tokens` | `int` | 否 | `0` | 消耗的 token 数 |
+| `feedback` | `str \| None` | 否 | `None` | 结构化反馈（原 `error_msg`）；无反馈为 `None`，`FailurePattern` 依赖它 |
+| `created_at` | `float` | 否 | `default_factory=time.time` | 时间戳 |
+
+#### AgentPerformance 字段
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `agent_id` | `str` | 是 | — | Agent 标识 |
+| `task_type` | `str` | 是 | — | 任务类型；与 `agent_id` 构成复合键，一条画像 = 一个 Agent 在一个任务类型上的表现 |
+| `total_tasks` | `int` | 否 | `0` | 总执行次数 |
+| `success_rate` | `float \| None` | 否 | `None` | 历史成功率；`total_tasks=0` 时为 `None` |
+| `avg_quality` | `float \| None` | 否 | `None` | 平均质量；无评分时为 `None` |
+| `avg_steps` | `float \| None` | 否 | `None` | 平均执行步数；无数据时为 `None` |
+| `avg_cost` | `float \| None` | 否 | `None` | 平均 token 成本；无数据时为 `None` |
+
+> `AgentMemory` 聚合时必须跳过 `success is None` 的记录；上表任一统计量为 `None` 表示「没有数据」，Auctioneer 不得当 0 使用。
 
 ### 写入时序（**决定记忆是否真正生效**）
 
 ```
 Agent.execute() 结束
-  → 生成 ExecutionRecord（此时 success 与 quality 尚不可知）
+  → 生成 ExecutionRecord（success / quality 均为 None）
   → Orchestrator 在 QualityGate 给出结论后回写：
         record.success = gate_result.passed
         record.quality = gate_result.score
+        record.steps / record.tokens = 执行记录
+        record.feedback = gate_result.feedback
   → 调用 memory.record(record)
 ```
+
+> `success is None` 的记录表示门控尚未回写；`AgentMemory` 聚合时必须跳过，否则会污染 `success_rate`。
 
 > ⚠️ **失效模式（必须避免）**：若在 `execute()` 内部写入记忆，且将 `success` 硬编码为 `True`，
 > 则 `success_rate` 恒为 1.0、`avg_quality` 恒为 0，
@@ -1310,7 +1491,7 @@ if ref:
 ```
 confidence = 0.4 × 静态匹配 + 0.6 × 动态表现
 动态表现   = 0.5 × success_rate + 0.5 × avg_quality
-无历史记录 → 动态表现取先验值 0.5（不得取 0，否则新 Agent 永远无法出价）
+无历史记录，或 success_rate / avg_quality 为 None → 对应项与整体动态表现取先验值 0.5（不得取 0，否则新 Agent 永远无法出价）
 ```
 
 ### 失效模式分析
@@ -1318,6 +1499,7 @@ confidence = 0.4 × 静态匹配 + 0.6 × 动态表现
 | 现象 | 根因 | 对策 |
 |---|---|---|
 | 历史学习不生效 | `success` 硬编码、`quality` 未回写 | 由 Orchestrator 在门控后回写 |
+| `success=None` 被计入聚合 | 记录在门控前生成 | 聚合前跳过 `success is None` |
 | 新 Agent 永不出价 | 无历史导致 confidence 偏低 | 无历史时取先验 0.5 |
 | 失败模式库无限膨胀 | 无去重与上限 | 同类型仅保留 1 条，总数 ≤ 20 |
 | 注入内容挤占上下文 | 参考文本过长 | 硬性限制 300 字 |
@@ -1328,6 +1510,7 @@ confidence = 0.4 × 静态匹配 + 0.6 × 动态表现
 - [ ] 记录一条失败执行后，`success_rate` 下降
 - [ ] 门控后回写 quality，`avg_quality` 随之变化
 - [ ] 无历史时 `confidence` 不为 0
+- [ ] `total_tasks=0` 时统计量为 `None`，Auctioneer 回退先验 0.5
 - [ ] 同类失败 2 次后生成 `FailurePattern`
 - [ ] 注入文本长度 ≤ 300 字
 
@@ -1595,6 +1778,10 @@ class EventBus(Protocol):
     def drain(self) -> list[Event]: ...
 ```
 
+> `subscribe(topic)` 是协议要求的最小形态，返回迭代器，调用方必须消费；内存实现额外提供 `on(topic, callback)` 做同步回调，回调异常只记日志，不改变协议调用方式。
+
+**topic 约定**：topic 取 `event.event_type.value`（如 `task_created`）；`'*'` 表示订阅全部。事件没有独立的 topic 字段（§3 已冻结），因此不按 `task_id` / `trace_id` 分频道。
+
 ### 实现策略（ADR-13）
 
 | 阶段 | 实现 | 说明 |
@@ -1618,9 +1805,9 @@ class EventBus(Protocol):
 
 ### 测试点
 
-- [ ] 发布的事件能被 `drain()` 取出，且顺序正确
-- [ ] 订阅回调抛异常不影响发布方
-- [ ] 替换实现时，调用方代码无需改动
+- [x] 发布的事件能被 `drain()` 取出，且顺序正确
+- [x] 订阅回调抛异常不影响发布方
+- [x] 替换实现时，调用方代码无需改动
 
 ---
 
@@ -1700,10 +1887,10 @@ run(benchmark: BenchmarkTask, config: EvalConfig, repeat: int = 5) -> EvalResult
 
 ### 尚未定义的类型（W2 冻结时定稿）
 
-`PlanContext`、`SystemStatus`、`Resolution`、`ToolResult`、`SandboxLimits`、`LLMResponse`、`Event`、`ExecutionRecord`、`AgentPerformance`、`BenchmarkTask`、`EvalConfig`、`EvalResult`
+`Resolution`
 
-> 这些类型目前只以名字出现在本章与第 5 章，尚未在 `core/types.py` 落地。
-> 接口冻结前必须逐个定稿，否则相关接口无法编写测试。
+> 除 `Resolution`（延 W6）外，W2 的 12 个类型已全部落 `core/types.py`。
+> 本轮新增支撑类型：`ToolCall`（`LLMResponse.tool_calls` 的元素，字段见 `types.py`，§5.8 文档已合并（PR #15））、`MetricStat`（`EvalResult.metrics` 的元素，见 §5.12），两者已登记。
 
 ---
 
@@ -1712,17 +1899,17 @@ run(benchmark: BenchmarkTask, config: EvalConfig, repeat: int = 5) -> EvalResult
 | 模块 | 文件 | 状态 | 与本章规格的差距 |
 |---|---|---|---|
 | Planner | `core/planner.py` | 骨架 | `context` 无类型标注（待 `PlanContext`）；分解为写死模板（W3）；`replan` 未实现（W5） |
-| Auctioneer | `core/auctioneer.py` | 骨架 | `auction` 未用 `score` 加权，且平分时胜负取决于 agents 顺序（W3） |
+| Auctioneer | `core/auctioneer.py` | 骨架 | `auction` 未用 `score` 加权；精确匹配之间仍按 agents 顺序，通配已由 `_is_exact_match` 优先（W3） |
 | Agent | `core/agent.py` | 骨架 | `bid` 返回固定值；`execute` 未走 ReAct（W3） |
-| Orchestrator | `core/orchestrator.py` | 骨架 | 串行主循环；`cancel`（W4）、`status`（W7）为桩；`status` 无返回标注（待 `SystemStatus`） |
+| Orchestrator | `core/orchestrator.py` | 骨架 | 串行主循环；`cancel`（W4）、`status`（W7）为桩；无竞标目前直接 `IMPOSSIBLE`，尚未实现「首次放宽重发」（§3.3/§4.2，W3/W4） |
 | QualityGate | `core/quality_gate.py` | 骨架 | 一律放行，三层校验未实现（W5） |
 | ConflictResolver | `core/conflict.py` | 骨架 | `detect` 恒返回 `[]`；`resolve` 未实现（W6），返回标注待 `Resolution` |
 | ToolSandbox | `tools/sandbox.py` | 骨架 | 未实现任何工具（W6）；`__init__` 缺 `limits`；返回 `str` 待改 `ToolResult` |
 | LLMGateway | `llm/gateway.py` | 骨架 | `complete` / `chat` 均抛 `NotImplementedError`（W3）；`chat` 返回标注待 `LLMResponse` |
-| StateStore | `memory/store.py` | 可用 | 内存实现；`log_event` 仍收 `dict`（W2 改 `Event`）；生产路径暂无事件写入方（W4） |
+| StateStore | `memory/store.py` | 可用 | 内存实现；`log_event(e: Event)` 已收口；生产路径暂无事件写入方（W4） |
 | Tracer | `observability/tracer.py` | 可用 | `span` 已实现；`record_metric` 为桩（W8） |
 | AgentMemory | `memory/agent_memory.py` | 未创建 | W5–W7 |
-| EventBus | `core/event_bus.py` | 未创建 | W2 随接口冻结定稿 |
+| EventBus | `core/event_bus.py` | 可用 | 内存实现（Protocol + InMemoryEventBus + 6 个测试）；Redis 留二期 |
 | BuiltinTools | `tools/builtins.py` | 未创建 | W3，Agent 执行依赖 |
 | EvalFramework | `eval/` | 空壳 | 目录与 `__init__.py` 已存在，无实现；W8 |
 
