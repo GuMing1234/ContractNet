@@ -202,14 +202,12 @@ def test_store_events_filter_hit_and_miss():
 
 def test_store_events_filter_survives_model_events():
     '''W2 事件改为模型后，过滤不能静默返回空。'''
-
-    
-
     from contractnet.memory.store import StateStore
 
     store = StateStore()
-    
-    store.log_event(Event(trace_id='aaa', event_type="task_created"))
+    store.log_event(Event(trace_id='aaa', event_type='task_created'))
+    assert len(store.events('aaa')) == 1
+    assert store.events('other-trace') == []
 
 
 # ──────────────────────────────────────────────
