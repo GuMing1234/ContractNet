@@ -1116,6 +1116,76 @@ class ToolSandbox:
     def execute(self, tool_name: str, args: dict) -> ToolResult: ...
 ```
 
+### 返回类型与资源限制
+
+`ToolSandbox.execute()` 统一返回 `ToolResult`，不再返回裸字符串。工具错误不抛异常：`success=False`，`content` 以 `Error:` 开头，`error` 保存结构化原因；`success=False` 只表示本次调用不成功，不表示 Agent 应自动重试。
+
+#### ToolResult
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `tool_name` | `str` | 是 | — | 工具名（`file_read` / `file_write` / `code_run` / `test_run` / `list_dir`），用于审计与错误定位 |
+| `success` | `bool` | 是 | — | 本次工具调用是否成功；消费方据此决定错误呈现，但不应自动重试 |
+| `content` | `str` | 是 | — | 模型可见的结果文本；成功为输出正文，失败由沙箱写成 `Error: ...`（已截断） |
+| `error` | `str \| None` | 否 | `None` | 结构化错误原因（不含 `Error:` 前缀），供测试、日志与审计；成功时为 `None` |
+| `truncated` | `bool` | 否 | `False` | 输出是否因超限被截断；正文末尾同时保留 `...[truncated]` |
+| `exit_code` | `int \| None` | 否 | `None` | `code_run` / `test_run` 的退出码；其他工具为 `None` |
+| `duration_ms` | `int` | 否 | `0` | 工具执行耗时，供 `tool_call` span 与诊断 |
+
+**不变量**：
+
+- `success=False` 时 `error` 必须非空；`success=True` 时 `error` 必须为 `None`。
+- `content` 失败时已带 `Error:` 前缀；`error` 只存结构化原因，避免消费方漏加前缀。
+- 不设 `tool_call_id`：`execute(tool_name, args)` 拿不到调用 ID，配对由 Agent 用当前 `call.id` 完成。
+
+**生产/消费**：由 `ToolSandbox.execute()` 生产，`BaseAgent.execute()` 的 ReAct 循环消费（把 `content` 回填为 tool 消息）；Tracer 只读 `duration_ms` / `truncated` 打 span。
+
+#### SandboxLimits
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `max_file_read_bytes` | `int` | 否 | `102_400`（100 KiB） | `file_read` 单次最大读取字节数，属于 I/O 防护上限 |
+| `max_file_write_bytes` | `int` | 否 | `1_048_576`（1 MiB） | `file_write` 单次最大写入字节数；超出直接失败，不部分写入 |
+| `max_output_chars` | `int` | 否 | `10_000` | 单次回填给模型的输出最大字符数（按字符计）；超出截断并置 `truncated=True` |
+| `code_run_timeout_s` | `float` | 否 | `30.0` | `code_run` 超时秒数 |
+| `test_run_timeout_s` | `float` | 否 | `120.0` | `test_run` 超时秒数 |
+| `list_max_depth` | `int` | 否 | `3` | `list_dir` 最大递归深度 |
+
+**校验约束**（Pydantic）：
+
+```python
+max_file_read_bytes: int = Field(default=102_400, gt=0)
+max_file_write_bytes: int = Field(default=1_048_576, gt=0)
+max_output_chars: int = Field(default=10_000, gt=0)      # 按字符计
+code_run_timeout_s: float = Field(default=30.0, gt=0)
+test_run_timeout_s: float = Field(default=120.0, gt=0)
+list_max_depth: int = Field(default=3, ge=0)
+```
+
+**配置约定**：
+
+- 默认值与本节「内置工具」表一致。
+- `max_output_chars` 按字符计数，默认 10,000；`max_file_read_bytes` / `max_file_write_bytes` 按字节计数，两者不要混用。
+- `max_output_chars` 是模型可见输出上限，不是文件读取上限；`file_read` 的读取上限由 `max_file_read_bytes` 控制，回填给模型的文本仍受 `max_output_chars` 限制。
+- 不包含 `workspace`、`max_steps` 和工具权限：`workspace` 是构造参数，`max_steps` 属于 `ContractConstraints`，权限见本节「Agent 与工具权限矩阵」。
+- 本轮配置来源：代码默认值 + 显式参数，不新增环境变量。
+
+**生产/消费**：由 R5 配置层生产，作为 `ToolSandbox.__init__(workspace, limits)` 的入参被沙箱消费；`limits` 默认 `SandboxLimits()`。Agent 与契约不直接修改。
+
+#### 截断与失败语义
+
+| 场景 | `success` | `truncated` | `content` / `error` |
+|---|---|---|---|
+| `file_read` 命中 `max_file_read_bytes` 或 `max_output_chars` | `True` | `True` | 返回截断内容，末尾 `...[truncated]` |
+| `file_write` 超过 `max_file_write_bytes` | `False` | `False` | `Error: 文件过大`，不部分写入 |
+| `code_run` / `test_run` 输出超过 `max_output_chars` | 视退出码 | `True` | 截断输出，保留 `exit_code` |
+| `code_run` 非零退出 | `False` | 视输出 | `Error: 非零退出 N`，`content` 保留 stdout/stderr |
+| `test_run` 用例失败 | `False` | 视输出 | `Error: 用例失败`，`content` 保留测试摘要 |
+| `list_dir` 超过 `list_max_depth` | `True` | `True` | 只返回深度内条目 |
+| 未知工具 / 路径越界 / 文件不存在 / 超时 | `False` | `False` | `content` 以 `Error:` 开头 |
+
+**权限**：工具权限不在 `SandboxLimits` 中；权限矩阵与收窄规则见本节「Agent 与工具权限矩阵」。`BaseAgent` 必须在调用 `execute()` 前校验 `tool_name`；`ToolSandbox` 对未知工具返回 `Error: 未知工具 ...`。
+
 ### 内置工具
 
 | 工具 | 权限 | 限制 |
@@ -1185,6 +1255,52 @@ class LLMGateway:
     def complete(self, prompt: str, **opts) -> str: ...
     def chat(self, messages: list[dict], tools=None, **opts) -> LLMResponse: ...
 ```
+
+### 返回类型与约定
+
+`LLMGateway.chat()` 统一返回 `LLMResponse`；`complete()` 仍返回 `str`。`LLMResponse` 至少包含 `content` 与 `tool_calls`：`tool_calls` 为空表示模型给出最终回答，ReAct 循环退出；非空表示继续执行工具并回填 assistant 消息。
+
+#### ToolCall
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `id` | `str` | 是 | — | 供应商返回的调用 ID；回填 tool 消息时作为 `tool_call_id`，必须与 assistant 消息一致 |
+| `name` | `str` | 是 | — | 工具名，直接对应沙箱内置工具 |
+| `args` | `dict` | 否 | `{}` | 解析后的调用参数；`args` 属于 §6 明确允许的协议边界例外 |
+| `args_error` | `str \| None` | 否 | `None` | 参数 JSON 解析失败时的错误信息；正常解析为 `None`，此时 `args` 为空字典 |
+
+**约定**：
+
+- 本期只支持 function calling，`type` 固定为 `function`，不单独建字段；`raw_message` 保留原始结构。
+- `args_error` 非空时，Agent 不应执行该工具，而应把错误作为 tool 结果回填给模型。
+
+**生产/消费**：由 `LLMGateway.chat()` 解析供应商响应时生产，随 `LLMResponse` 被 ReAct 循环消费。
+
+#### LLMResponse
+
+| 字段名 | 类型 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `content` | `str` | 是 | — | 模型自然语言输出；纯工具调用轮由网关把供应商的 `None` 归一化为 `''` |
+| `tool_calls` | `list[ToolCall]` | 否 | `[]` | 本轮要执行的工具调用；为空表示模型给出最终回答，ReAct 循环据此退出 |
+| `finish_reason` | `str` | 否 | `''` | `stop` / `tool_calls` / `length` 等，用于判断是否被截断 |
+| `model` | `str` | 否 | `''` | 实际服务模型，便于回放与按模型归因 |
+| `prompt_tokens` | `int \| None` | 否 | `None` | 输入 token 数；`None` 表示供应商未返回，不能当 0 计入成本 |
+| `completion_tokens` | `int \| None` | 否 | `None` | 输出 token 数；`None` 表示供应商未返回 |
+| `total_tokens` | `int \| None` | 否 | `None` | 总 token 数；`None` 表示供应商未返回 |
+| `raw_message` | `dict \| None` | 否 | `None` | 原始 assistant 消息，供下一轮原样回填 |
+| `latency_ms` | `int` | 否 | `0` | 单次调用耗时，供 `llm_call` span |
+| `cached` | `bool` | 否 | `False` | 是否命中缓存/回放，供成本统计与调试 |
+
+**约定**：
+
+- `raw_message`：保存供应商返回的原始 assistant 消息。ReAct 下一轮必须原样回填该消息（尤其 `tool_calls`），否则 API 会报 400。执行工具以结构化 `tool_calls` 为准，`raw_message` 只用于回填；它属于 §6 公约第 1 条的 `messages` 协议边界例外。
+- `content`：网关负责把供应商的 `None` 归一化为 `''`。
+- token：`None` 表示未知，`0` 表示明确为 0；成本统计必须把 `None` 标为 unknown，不能当免费。
+- `cached=True`：保留原始 usage；成本统计按 `cached` 过滤，避免缓存命中被重复计费；同样保存 `raw_message`。
+- `finish_reason='length'`：输出被截断，消费方不得当作完整最终回答。
+- `ToolCall.args`：属于 §6 公约第 1 条允许的 `args` 协议边界例外。
+
+**生产/消费**：由 `LLMGateway.chat()` 生产，`BaseAgent.execute()` 的 ReAct 循环消费（`tool_calls` 驱动循环、`content` 收尾、`raw_message` 回填）；Tracer 消费 `model` / usage / `latency_ms` / `cached` 做归因。`complete()` 仍返回 `str`，不涉及 `LLMResponse`。
 
 ### 必须实现的能力（团队项目的刚需）
 
