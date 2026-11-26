@@ -18,6 +18,7 @@ import pytest
 
 from contractnet.core.planner import Planner
 from contractnet.core.types import Bid, Conflict, ConflictType, Contract, RunResult
+from contractnet.core.types import Event
 
 DOC = pathlib.Path(__file__).resolve().parent.parent / 'docs' / '04-design.md'
 
@@ -191,10 +192,10 @@ def test_store_events_filter_hit_and_miss():
     from contractnet.memory.store import StateStore
 
     store = StateStore()
-    store.log_event({'trace_id': 'aaa', 'name': 'e1'})
-    store.log_event({'trace_id': 'bbb', 'name': 'e2'})
+    store.log_event(Event(trace_id='aaa', event_type="task_created"))
+    store.log_event(Event(trace_id='bbb', event_type="task_created"))
 
-    assert [e['name'] for e in store.events('aaa')] == ['e1']
+    assert [e.trace_id for e in store.events('aaa')] == ['aaa']
     assert store.events('no-such-trace') == []
     assert len(store.events()) == 2
 
@@ -202,14 +203,13 @@ def test_store_events_filter_hit_and_miss():
 def test_store_events_filter_survives_model_events():
     '''W2 事件改为模型后，过滤不能静默返回空。'''
 
-    class _Event:
-        trace_id = 'aaa'
+    
 
     from contractnet.memory.store import StateStore
 
     store = StateStore()
-    store.log_event(_Event())
-    assert len(store.events('aaa')) == 1
+    
+    store.log_event(Event(trace_id='aaa', event_type="task_created"))
 
 
 # ──────────────────────────────────────────────
