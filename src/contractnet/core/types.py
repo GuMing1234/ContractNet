@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 def new_id(prefix: str) -> str:
@@ -77,15 +80,25 @@ class TaskDAG(BaseModel):
         self.tasks[task.task_id] = task
 
     def ready_tasks(self) -> list[Task]:
-        '''返回所有「自己是 PENDING」且「依赖全是 DONE」的任务。'''
+        '''返回所有「自己是 PENDING」且「依赖全是 DONE」的任务。
+
+        依赖缺失视为不满足并记 warning（§4.3），不能静默当成就绪。
+        '''
         ready: list[Task] = []
         for task in self.tasks.values():
             if task.status is not TaskStatus.PENDING:
                 continue
+            missing = [dep for dep in task.depends_on if dep not in self.tasks]
+            if missing:
+                logger.warning(
+                    '任务 %s 的依赖不存在：%s，视为未就绪',
+                    task.task_id,
+                    missing,
+                )
+                continue
             deps_ok = all(
                 self.tasks[dep].status is TaskStatus.DONE
                 for dep in task.depends_on
-                if dep in self.tasks
             )
             if deps_ok:
                 ready.append(task)
@@ -102,6 +115,14 @@ class TaskDAG(BaseModel):
     def update_status(self, task_id: str, status: TaskStatus) -> None:
         if task_id in self.tasks:
             self.tasks[task_id].status = status
+
+
+class PlanContext(BaseModel):
+    '''Planner 分解任务的输入上下文（§5.1 / §6）。'''
+
+    existing_files: list[str] = Field(default_factory=list)
+    available_task_types: list[str] = Field(default_factory=list)
+    historical_tasks: list[Task] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -265,6 +286,24 @@ class RunResult(BaseModel):
     metrics: dict = Field(default_factory=dict)
 
 
+class SystemStatus(BaseModel):
+    '''Orchestrator.status() 的运行中快照（§5.4 / §6，W7 实现）。
+
+    与 RunResult 的区别：RunResult 是执行结束后的结果；
+    SystemStatus 是执行进行中的状态，可随时读取。
+    '''
+
+    running: bool
+    goal: str | None = None
+    trace_id: str | None = None
+    task_counts: dict[str, int] = Field(
+        default_factory=lambda: {status.value: 0 for status in TaskStatus}
+    )
+    inflight_task_ids: list[str] = Field(default_factory=list)  # RUNNING + REVIEWING
+    busy_agent_ids: list[str] = Field(default_factory=list)
+    used_tokens: int | None = None  # None = 网关未报告，不能当 0
+
+
 # ──────────────────────────────────────────────
 # 事件（日志与回放）
 # ──────────────────────────────────────────────
@@ -314,3 +353,137 @@ class CapabilityProfile(BaseModel):
     task_types: list[str] = Field(default_factory=list)   # 能接的任务类型，'*' 表示通配
     tools: list[str] = Field(default_factory=list)        # 允许使用的工具名
     base_confidence: float = 0.5                          # 冷启动置信度（ADR-07 用历史成功率兜底）
+
+
+# ──────────────────────────────────────────────
+# 工具配套类型
+# ──────────────────────────────────────────────
+class ToolResult(BaseModel):
+    '''工具执行结果（§5.7）。由 ToolSandbox.execute() 产出。'''
+
+    tool_name: str
+    success: bool
+    content: str
+    error: str | None = None
+    truncated: bool = False
+    exit_code: int | None = None
+    duration_ms: int = 0
+
+
+class SandboxLimits(BaseModel):
+    '''工具沙箱的资源限制（§5.7）。'''
+
+    max_file_read_bytes: int = Field(default=102_400, gt=0)
+    max_file_write_bytes: int = Field(default=1_048_576, gt=0)
+    max_output_chars: int = Field(default=10_000, gt=0)
+    code_run_timeout_s: float = Field(default=30.0, gt=0)
+    test_run_timeout_s: float = Field(default=120.0, gt=0)
+    list_max_depth: int = Field(default=3, ge=0)
+
+
+# ──────────────────────────────────────────────
+# LLM 配套类型
+# ──────────────────────────────────────────────
+class ToolCall(BaseModel):
+    '''模型要求执行的一次工具调用（§5.8）。'''
+
+    id: str
+    name: str
+    args: dict = Field(default_factory=dict)
+    args_error: str | None = None
+
+
+class LLMResponse(BaseModel):
+    '''LLMGateway.chat() 的一次回复（§5.8）。'''
+
+    content: str
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    finish_reason: str = ''
+    model: str = ''
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    raw_message: dict | None = None
+    latency_ms: int = 0
+    cached: bool = False
+
+
+# ──────────────────────────────────────────────
+# 记忆配套类型
+# ──────────────────────────────────────────────
+class ExecutionRecord(BaseModel):
+    '''一次执行的记录（§5.11）。门控后由 Orchestrator 回写。'''
+
+    record_id: str = Field(default_factory=lambda: new_id('rec'))
+    task_id: str
+    agent_id: str
+    contract_id: str
+    task_type: str
+    success: bool | None = None
+    quality: float | None = None
+    steps: int = 0
+    tokens: int = 0
+    feedback: str | None = None
+    created_at: float = Field(default_factory=time.time)
+
+
+class AgentPerformance(BaseModel):
+    '''一个 Agent 在一个 task_type 上的能力画像（§5.11）。'''
+
+    agent_id: str
+    task_type: str
+    total_tasks: int = 0
+    success_rate: float | None = None
+    avg_quality: float | None = None
+    avg_steps: float | None = None
+    avg_cost: float | None = None
+
+
+# ──────────────────────────────────────────────
+# 评估配套类型
+# ──────────────────────────────────────────────
+class BenchmarkTask(BaseModel):
+    '''一个基准任务的定义（§5.12）。'''
+
+    benchmark_id: str = Field(min_length=1)
+    name: str
+    goal: str
+    difficulty: Literal['easy', 'medium', 'hard']
+    success_criteria: dict = Field(min_length=1)
+    needs_human_label: list[str] = Field(default_factory=list)
+    optimal_steps: int = Field(gt=0)
+
+
+class EvalConfig(BaseModel):
+    '''一次实验的配置（§5.12）。'''
+
+    config_id: str = Field(min_length=1)
+    model: str = 'deepseek-chat'
+    judge_model: str = ''
+    max_concurrent: int = Field(default=4, ge=1)
+    max_tokens: int = Field(default=5000, gt=0)
+    max_rounds: int = Field(default=200, gt=0)
+    replay: bool = False
+    budget_cny: float | None = Field(default=None, ge=0)
+
+
+class MetricStat(BaseModel):
+    '''中位数 + 范围 + 样本数（§5.12）。'''
+
+    median: float
+    min: float
+    max: float
+    n: int = Field(ge=1)
+
+
+class EvalResult(BaseModel):
+    '''基准 × 配置 × N 次重复的汇总（§5.12）。'''
+
+    benchmark_id: str = Field(min_length=1)
+    config_id: str = Field(min_length=1)
+    repeat: int = Field(ge=1)
+    metrics: dict[str, MetricStat] = Field(min_length=1)
+    config_snapshot: dict = Field(min_length=1)
+    failures: list[str] = Field(default_factory=list)
+    started_at: float = Field(default_factory=time.time)
+    duration_s: float = Field(default=0.0, ge=0)

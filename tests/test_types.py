@@ -1,5 +1,7 @@
 '''数据结构的单元测试。这些是地基，必须稳。'''
 
+import logging
+
 from contractnet.core.types import Task, TaskDAG, TaskStatus
 
 
@@ -14,6 +16,18 @@ def test_ready_tasks_respects_dependencies():
 
     dag.update_status(a.task_id, TaskStatus.DONE)
     assert dag.ready_tasks() == [b]          # a 完成后 b 才就绪
+
+
+def test_ready_tasks_missing_dependency_is_not_ready(caplog):
+    '''依赖缺失必须视为不就绪并记 warning（§4.3），不能静默通过。'''
+    dag = TaskDAG(goal='g')
+    task = Task(description='x', depends_on=['missing_task_id'])
+    dag.add(task)
+
+    with caplog.at_level(logging.WARNING):
+        assert dag.ready_tasks() == []
+
+    assert '依赖不存在' in caplog.text
 
 
 def test_all_terminal_includes_failed():
