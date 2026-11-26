@@ -1643,7 +1643,7 @@ budget_cny: float | None = Field(default=None, ge=0)
 | `metrics` | `dict[str, MetricStat]` | 是 | — | 指标名 → 中位数 / 最小值 / 最大值 / 样本数 |
 | `config_snapshot` | `dict` | 是 | — | 报告证据：`model` / `max_concurrent` / `commit` / 运行环境，用于复现 |
 | `failures` | `list[str]` | 否 | `[]` | 未完成的重复轮及原因（如「第 3 轮 LLM 超时」） |
-| `started_at` | `float` | 否 | `time.time()` | 开始时间戳 |
+| `started_at` | `float` | 否 | `Field(default_factory=time.time)` | 开始时间戳（必须是工厂，见下方不变量） |
 | `duration_s` | `float` | 否 | `0.0` | 整轮墙钟耗时（秒），只作运维参考，不进指标对比 |
 
 **校验约束**：
@@ -1652,9 +1652,10 @@ budget_cny: float | None = Field(default=None, ge=0)
 benchmark_id: str = Field(min_length=1)
 config_id: str = Field(min_length=1)
 repeat: int = Field(ge=1)
-metrics: dict[str, MetricStat] = Field(default_factory=dict)
-config_snapshot: dict = Field(default_factory=dict)
+metrics: dict[str, MetricStat] = Field(min_length=1)   # 空 metrics = 空报告，必须拒
+config_snapshot: dict = Field(min_length=1)            # 空快照 = 无法复现，必须拒
 failures: list[str] = Field(default_factory=list)
+started_at: float = Field(default_factory=time.time)   # ⚠️ 不能写 `= time.time()`
 duration_s: float = Field(default=0.0, ge=0)
 ```
 
@@ -1677,8 +1678,10 @@ duration_s: float = Field(default=0.0, ge=0)
 **不变量**：
 
 - `metrics` 的值一律是 `MetricStat`；**不允许**把均值塞进 `median`，也不允许只报均值不报范围。
+- `metrics` / `config_snapshot` **不接受空字典**：空 `metrics` 等于交了一份空报告，空 `config_snapshot` 等于无法复现，所以两者必填、校验写成 `Field(min_length=1)`，**不设 `default_factory`**。
 - 某指标一轮有效样本都没有时，该键**不出现**在 `metrics` 里（而不是写 `0`），原因记入 `failures`——`0` 与「没测到」必须可分（同 ADR-04 的取值原则）。
 - `config_snapshot` 由 runner 在**运行时**从实际生效配置与 `git rev-parse HEAD` 生成，不得回抄 `EvalConfig` 的字面值；否则「报告无法复现」这条失效模式拦不住。
+- `started_at` 必须用 `Field(default_factory=time.time)`；写成 `started_at: float = time.time()` 会在**类定义时**只求值一次，所有实例共享同一个时间戳（§3 的 `created_at` 已是工厂写法，照抄即可）。
 - 单轮异常不 `raise`（§6 公约 3）：记入 `failures` 继续跑完剩余轮次；只有「基准或配置本身非法」才抛。
 
 **生产 / 消费**：唯一生产点是 `eval/runner.py` 的 `run()`。消费方是报告生成器（JSON 与 Markdown 双份，字段与 §5.12 报告结构一一对应）与 W8 对比表；`Tracer` / `Orchestrator` 不消费它。`metrics.py` 不生产它——`metrics.py` 是纯函数，只算单轮的 `float`，汇总成 `MetricStat` 是 runner 的职责。
