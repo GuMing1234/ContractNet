@@ -34,7 +34,7 @@ ConflictResolver  检测并消解跨 Agent 冲突
 | **05** | [项目计划](05-project-plan.md)  | 角色分工、里程碑、组会机制      | 所有人      | 组会前       |
 | **06** | [团队分工](06-members.md)       | 谁负责哪个模块            | 所有人      | 认领后       |
 | —      | [TASKS](../TASKS.md)        | 当前可认领的任务           | 所有人      | 每次开工前     |
-| —      | [weekly/](weekly/)          | 每周计划与组会记录          | 所有人      | 周五组会      |
+| —      | [weekly/](weekly/)          | 每周计划与组会记录          | 所有人      | 周日组会      |
 | —      | [decisions/](decisions/)    | 个人设计决策记录           | 各自       | 每做决策      |
 | —      | [archive/](archive/)        | 历史文档（已被取代）         | 极少需要     | 追溯原因时     |
 
