@@ -7,13 +7,8 @@
 '''
 
 from __future__ import annotations
-from contractnet.core.types import Event
 
-def _trace_id_of(event) -> str | None:
-    '''兼容 dict 与模型两种事件载体，W2 切换 Event 模型时不至于静默返回空。'''
-    if isinstance(event, dict):
-        return event.get('trace_id')
-    return getattr(event, 'trace_id', None)
+from contractnet.core.types import Event
 
 
 class StateStore:
@@ -21,7 +16,7 @@ class StateStore:
 
     def __init__(self) -> None:
         self._artifacts: dict = {}
-        self._events: list = []
+        self._events: list[Event] = []
 
     def save_artifact(self, artifact) -> str:
         self._artifacts[artifact.artifact_id] = artifact
@@ -34,16 +29,12 @@ class StateStore:
         return list(self._artifacts.values())
 
     def log_event(self, event: Event) -> None:
-        '''记录事件（用于回放）。
-
-        
-        '''
+        '''记录事件（用于回放）。'''
         self._events.append(event)
 
-    def events(self, trace_id: str | None = None) -> list:
+    def events(self, trace_id: str | None = None) -> list[Event]:
         '''取出事件。给定 trace_id 时只返回该次执行产生的事件。
 
-        
         TODO(W4): Orchestrator 尚未调用 log_event，当前生产路径上事件列表恒为空，
                   过滤逻辑本身已有单元测试覆盖。
         '''
