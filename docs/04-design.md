@@ -1639,10 +1639,10 @@ budget_cny: float | None = Field(default=None, ge=0)
 |---|---|---|---|---|
 | `benchmark_id` | `str` | 是 | — | 本次跑的基准，外键指向 `BenchmarkTask.benchmark_id` |
 | `config_id` | `str` | 是 | — | 本次用的配置，外键指向 `EvalConfig.config_id` |
-| `repeat` | `int` | 是 | — | 实际完成的重复轮数（计划 5 轮；失败轮进 `failures`，不靠重跑凑数） |
+| `repeat` | `int` | 是 | — | **计划**重复轮数（即 `run(repeat=N)` 传入的值）。实际完成轮数 = `repeat - len(failures)`，可推导，**不单独存字段**（避免两个真相源） |
 | `metrics` | `dict[str, MetricStat]` | 是 | — | 指标名 → 中位数 / 最小值 / 最大值 / 样本数 |
 | `config_snapshot` | `dict` | 是 | — | 报告证据：`model` / `max_concurrent` / `commit` / 运行环境，用于复现 |
-| `failures` | `list[str]` | 否 | `[]` | 未完成的重复轮及原因（如「第 3 轮 LLM 超时」） |
+| `failures` | `list[str]` | 否 | `[]` | 未完成的重复轮及原因（如「第 3 轮 LLM 超时」）。**一条对应且仅对应一个未完成轮**（同一轮的多个原因合并为一条），因此 `len(failures)` 唯一确定未完成轮数 |
 | `started_at` | `float` | 否 | `Field(default_factory=time.time)` | 开始时间戳（必须是工厂，见下方不变量） |
 | `duration_s` | `float` | 否 | `0.0` | 整轮墙钟耗时（秒），只作运维参考，不进指标对比 |
 
@@ -1659,30 +1659,63 @@ started_at: float = Field(default_factory=time.time)   # ⚠️ 不能写 `= tim
 duration_s: float = Field(default=0.0, ge=0)
 ```
 
-**`metrics` 必含的键**（缺一个都可以被单指标刷分，§13.3）：
+**`metrics` 必含的键（8 个）**：= §9.2 指标定义（6 项）∪ §13.3 必须同时报（5 项）的**并集**，不多不少。
+缺任一项都可以被单指标刷分。
 
 | 键 | 含义 | 单位 |
 |---|---|---|
 | `success_rate` | 任务完成率 = DONE 数 / 总任务数 | 0–1 |
 | `first_pass_rate` | 首次通过率 = 一次 Gate 通过数 / 总任务数 | 0–1 |
 | `step_efficiency` | 步骤效率 = 实际总步数 / `optimal_steps`；1.0 为最优 | 比值 |
+| `avg_steps` | 平均步数 = 实际总步数 / 完成任务数 | 步 |
 | `tokens_per_task` | 总 token / 完成任务数 | token |
 | `duration_ms` | 每任务平均耗时 | 毫秒 |
 | `replan_rate` | 重规划率 = 触发 REPLANNED 的任务数 / 总任务数 | 0–1 |
 | `conflict_detection_rate` | 冲突检出率 = 检出冲突数 / 注入冲突数 | 0–1 |
 
-> ⚠️ **口径待确认（已同步给负责人）**：§13.3 要求「耗时」，而 §5.12 指标表没有这一项。
-> 本定稿按 §13.3 补 `duration_ms`，与 `replan_rate` / `conflict_detection_rate` 一起作为扩展键。
-> 若负责人判定本期只报五项，删掉后三个键即可，**类型形状不变**。
+| 键 | §9.2 定义项 | §13.3 必报项 |
+|---|---|---|
+| `success_rate` | 任务完成率 | 完成率 |
+| `first_pass_rate` | 首次通过率 | 首次通过率 |
+| `step_efficiency` | 步骤效率 | — |
+| `avg_steps` | — | 平均步数 |
+| `tokens_per_task` | Token 效率 | token |
+| `duration_ms` | — | 耗时（每任务平均，毫秒） |
+| `replan_rate` | 重规划率 | — |
+| `conflict_detection_rate` | 冲突检出率 | — |
+
+> 一行一个键，空栏表示该项不在对应清单里。
+
+> **`avg_steps` 与 `step_efficiency` 不重复，分母不同**：
+> - `avg_steps` = 实际总步数 / **完成任务数**，衡量单任务的绝对开销；
+> - `step_efficiency` = 实际总步数 / **`optimal_steps`**，衡量相对理论最优的倍数（1.0 为最优）。
+>
+> 不同难度的基准之间 `avg_steps` 不可横向比较，`step_efficiency` 可比。两个都报，
+> 因为「绝对开销」和「相对效率」回答不同问题：只报前者会被难基准拖累，只报后者可以靠挑简单基准刷分。
+
+> ✅ **口径已裁决（2026-11-27）**：报 **8 键**，= §9.2 六项 ∪ §13.3 五项 的并集，见上表。
+> §13.3 的「平均步数」对应 `avg_steps`（绝对值），与 §9.2 的 `step_efficiency`（比值）
+> 是两个不同指标，都要报。§13.3 本身仍只报 5 项，不改其措辞——那是验收标准。
 
 **不变量**：
 
 - `metrics` 的值一律是 `MetricStat`；**不允许**把均值塞进 `median`，也不允许只报均值不报范围。
 - `metrics` / `config_snapshot` **不接受空字典**：空 `metrics` 等于交了一份空报告，空 `config_snapshot` 等于无法复现，所以两者必填、校验写成 `Field(min_length=1)`，**不设 `default_factory`**。
-- 某指标一轮有效样本都没有时，该键**不出现**在 `metrics` 里（而不是写 `0`），原因记入 `failures`——`0` 与「没测到」必须可分（同 ADR-04 的取值原则）。
+- **指标样本缺失分两种，都不算「轮次失败」，都不记入 `failures`**：
+  - 部分成功轮没有样本（如未注入冲突的基准测不出 `conflict_detection_rate`）：指标照常汇总，
+    `n` 小于实际完成轮数；报告脚注标注 `n` 与实际完成轮数的差异。
+  - 所有成功轮都没有样本：该键**不出现**在 `metrics` 里（而不是写 `0`）；报告脚注注明「不适用 / 无数据」。
+  - `failures` **只记录未完成的轮次**。把指标缺失写进 `failures` 会让 `len(failures)` 变大，
+    反过来破坏 `实际完成轮数 = repeat - len(failures)` 这条恒等式。
 - `config_snapshot` 由 runner 在**运行时**从实际生效配置与 `git rev-parse HEAD` 生成，不得回抄 `EvalConfig` 的字面值；否则「报告无法复现」这条失效模式拦不住。
 - `started_at` 必须用 `Field(default_factory=time.time)`；写成 `started_at: float = time.time()` 会在**类定义时**只求值一次，所有实例共享同一个时间戳（§3 的 `created_at` 已是工厂写法，照抄即可）。
-- 单轮异常不 `raise`（§6 公约 3）：记入 `failures` 继续跑完剩余轮次；只有「基准或配置本身非法」才抛。
+- 单轮异常不 `raise`（§6 公约 3）：记入 `failures` 继续跑完剩余轮次；只有三种情况才抛：
+  「基准本身非法」「配置本身非法」「零有效轮次」（见下条）。
+- **零有效轮次必须抛，不得构造空报告**：当 `repeat - len(failures) == 0`（全部轮次都没拿到
+  `RunResult`）时，`runner.run()` 必须在构造 `EvalResult` **之前**抛出异常，不得构造
+  `metrics={}` 的结果。理由：空报告不是「零分」，是「没有结果」（同 ADR-04：未知 ≠ 0）。
+  `metrics` 的 `min_length=1` 保留作兜底，用于拦住**绕过 `run()` 的直接构造**；
+  它报出的 `too_short` 只是防御性校验，不能替代这里的语义错误。
 
 **生产 / 消费**：唯一生产点是 `eval/runner.py` 的 `run()`。消费方是报告生成器（JSON 与 Markdown 双份，字段与 §5.12 报告结构一一对应）与 W8 对比表；`Tracer` / `Orchestrator` 不消费它。`metrics.py` 不生产它——`metrics.py` 是纯函数，只算单轮的 `float`，汇总成 `MetricStat` 是 runner 的职责。
 
@@ -1695,7 +1728,7 @@ duration_s: float = Field(default=0.0, ge=0)
 | `median` | `float` | 是 | — | 中位数（报告主值） |
 | `min` | `float` | 是 | — | 最小值（范围下界） |
 | `max` | `float` | 是 | — | 最大值（范围上界） |
-| `n` | `int` | 是 | — | 参与统计的样本数（≤ `repeat`） |
+| `n` | `int` | 是 | — | 参与统计的样本数（≤ `repeat - len(failures)`，即不超过实际完成轮数） |
 
 **校验约束**：
 
@@ -1706,8 +1739,13 @@ n: int = Field(ge=1)               # 没有样本就不该有这条统计
 
 **不变量**：
 
-- `min ≤ median ≤ max`；`n ≥ 1`；`n <= EvalResult.repeat`。
-- `n < repeat` 时 `EvalResult.failures` 必须能解释缺口，否则等于悄悄丢样本。
+- `min ≤ median ≤ max`；`n ≥ 1`；`n <= EvalResult.repeat - len(EvalResult.failures)`
+  （一个指标最多在每一轮贡献一个样本，所以上限是**实际完成轮数**，不是计划轮数）。
+- `n < repeat - len(failures)` 时，说明该指标在部分**成功轮**里没有样本，**不算丢样本**、
+  **不记入 `failures`**；报告脚注标注 `n` 与实际完成轮数的差异。具体原因（如该基准未注入冲突）
+  由**基准定义**或**评测日志**补注——`EvalResult` 不含承载原因字段，不要求从它推导。
+- 实际完成轮数由 `repeat - len(failures)` 唯一确定（依赖上文字段定义「一条对一轮」），
+  不再单独校验，也不新增字段。
 - JSON 严格按 §5.12 的形状只输出 `{median, min, max}`；`n` 只出现在 Markdown 报告的脚注，不改动已公布的报告结构。
 
 **生产 / 消费**：由 `runner.run()` 在跨重复轮汇总时生产；报告生成器序列化消费。`metrics.py` 不产出 `MetricStat`（它只返回单轮 `float`）。
