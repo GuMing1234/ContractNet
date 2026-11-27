@@ -888,15 +888,67 @@ class Auctioneer:
 
 ```python
 class BaseAgent(ABC):
+    def __init__(
+        self,
+        agent_id: str,
+        name: str,
+        task_types: list[str],
+        llm: LLMGateway,
+        sandbox: ToolSandbox,
+        tools: list[str] | None = None,
+        memory: AgentMemory | None = None,
+    ) -> None: ...
+
     agent_id: str
     name: str
     task_types: list[str]
     tools: list[str]
     is_busy: bool
 
-    def bid(self, contract: Contract) -> Bid | None: ...
+    def bid(self, contract: Contract) -> Bid | None:
+        '''评估是否参与竞标；不参与返回 None，不抛业务异常。
+
+        返回 None 的情况：
+        - contract.task_type 不在 self.task_types 中，且 self.task_types 不含 '*'；
+        - contract.constraints.required_tools 未被 self.tools 覆盖。
+
+        返回 Bid 时填四个字段：
+        - capability：按 task_type 与工具覆盖做纯规则匹配，不含历史（§5.2）；
+        - confidence：有历史用 success_rate / avg_quality 计算，无历史取先验 0.5（§5.11）；
+        - estimated_cost：有历史用 avg_cost，无历史按 task_type 给默认值；
+        - plan：执行思路，可为空字符串。
+
+        本方法不调 LLM（ADR-11）；记忆读取失败只记 warning，按“无历史”处理，仍返回 Bid。
+        '''
+
     @abstractmethod
-    def execute(self, contract: Contract) -> Artifact: ...
+    def execute(self, contract: Contract) -> Artifact:
+        '''执行契约：拼 messages → llm.chat → 有 tool_calls 就执行并回填 → 无 tool_calls 或步数耗尽退出。
+
+        成功路径：
+        - 模型返回空 tool_calls：取 content 组装 Artifact，quality 留 None（ADR-04）。
+        - 达到 contract.deadline_steps：返回部分成果物，content 取最后一条 assistant content
+          （可能为空），feedback 记“达到 deadline_steps”，不返回 None。
+        - finish_reason='length'：输出被截断，不当作完整回答，按部分产出处理。
+
+        工具路径：
+        - ToolCall.args_error 非空：不执行工具，把错误作为该条 tool 消息的内容回填；
+        - 工具执行失败：不抛异常，用 ToolResult.content（已含 "Error: ..."）回填对应 tool 消息；
+        - 沙箱自身抛异常：在 Agent 这里兜住，记 warning，转成 "Error: ..." 字符串，循环继续。
+
+        回填约束：
+        - assistant 消息优先用 LLMResponse.raw_message 原样回填（含全部 tool_calls）；
+          为 None 时用 content / tool_calls 按 OpenAI 格式重建；
+        - 每个 tool 消息必须带对应 ToolCall.id 作为 tool_call_id；
+        - 模型一次返回 N 个 tool_calls，就回填 N 条 tool 消息，不能漏。
+
+        异常与边界：
+        - LLM 网关重试后仍失败等基础设施异常 → raise LLMError，由 Orchestrator 转任务失败，
+          不再进入 QualityGate；
+        - 本方法不修改 Task 状态（ADR-02），不写 Artifact.quality；
+        - 结束时生成 ExecutionRecord(steps, tokens, success=None, quality=None)，由 Orchestrator
+          门控后回写 success / quality。
+        '''
 ```
 
 ### 核心算法：ReAct 循环
