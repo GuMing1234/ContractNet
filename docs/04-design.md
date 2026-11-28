@@ -527,6 +527,50 @@ class CapabilityProfile(BaseModel):
 
 > W3 由 R1 与 R5 一起细化（`tools` 是否需要带参数/权限级别）。当前形状对齐 `BaseAgent` 现有构造参数，保证接口不缺。
 
+## 3.13 AuctionResult（竞标结果）
+
+> Auctioneer 的返回类型。`Bid | None` 装不下「为什么没人接」，所以 `None` 的原因与放宽建议随结果一起返回（ADR-16）。
+> 本节四个类型由 `tests/test_domain_model.py` 双向守护：文档写了代码必须有，代码有的文档必须写。
+
+**`NoBidReason`（无人竞标原因）**
+
+| 成员 | 值 | 含义 | Orchestrator 的动作 |
+|---|---|---|---|
+| `ALL_BUSY` | `all_busy` | 有能力接，但全部忙 | 等待重试；不放宽、不判 IMPOSSIBLE |
+| `NO_MATCH` | `no_match` | 没有 Agent 的 task_types 覆盖 | 直接 IMPOSSIBLE（放宽救不了） |
+| `TOOLS_MISSING` | `tools_missing` | 类型匹配，required_tools 不足 | 放宽 required_tools 后重发 |
+| `DECLINED` | `declined` | 能接且空闲，但 bid() 返回 None | 放宽资源后重发 |
+
+**`BidRejection`（单个 Agent 未出价的原因）**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | `str` | 未出价的 Agent |
+| `reason` | `NoBidReason \| None` | 能力维度结论；`None` 表示能力没问题 |
+| `busy` | `bool` | 时间维度事实，与 `reason` 正交 |
+| `detail` | `str` | 具体缺什么，供日志使用 |
+
+**`RelaxHint`（一条放宽建议）**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `field` | `str` | 目标字段名，闭集见 §5.2 |
+| `action` | `Literal['scale', 'drop']` | 放大倍数 / 去掉该项 |
+| `value` | `float` | `scale` 时的倍数 |
+| `detail` | `str` | 代价说明，如「去掉 code_run 意味着产出未经执行验证」 |
+
+**`AuctionResult`（一轮竞标的完整结果）**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `contract_id` | `str` | 本轮竞标的契约 |
+| `winner` | `Bid \| None` | 中标 Bid；无人竞标为 `None` |
+| `winner_score` | `float \| None` | 加权分；未评分时为 `None`，不是 0（ADR-04） |
+| `bids` | `list[Bid]` | 本轮收到的全部出价（含落选） |
+| `rejections` | `list[BidRejection]` | 每个未出价 Agent 的原因 |
+| `reason` | `NoBidReason \| None` | `winner` 为 `None` 时必填 |
+| `relax_hints` | `list[RelaxHint]` | 结构化放宽建议；`quality_threshold` 永不出现 |
+
 ---
 
 # 4. 核心流程

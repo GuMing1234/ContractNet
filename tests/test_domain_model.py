@@ -32,6 +32,9 @@ MODELS: dict[str, type] = {
     'Contract': T.Contract,
     'OutputSpec': T.OutputSpec,
     'Bid': T.Bid,
+    'BidRejection': T.BidRejection,
+    'RelaxHint': T.RelaxHint,
+    'AuctionResult': T.AuctionResult,
     'Artifact': T.Artifact,
     'Provenance': T.Provenance,
     'QualityResult': T.QualityResult,
@@ -42,7 +45,7 @@ MODELS: dict[str, type] = {
 }
 
 # §3 只承诺「存在」、不展开字段的
-CLASS_ONLY = ['TaskStatus', 'EventType', 'RunResult']
+CLASS_ONLY = ['TaskStatus', 'EventType', 'RunResult', 'NoBidReason']
 
 # 事件枚举必须与 §3.11 的 11 种一一对应
 EVENT_TYPES = {
