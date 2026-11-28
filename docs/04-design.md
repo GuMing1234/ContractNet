@@ -140,6 +140,8 @@
 
 ## 2.3 依赖关系
 
+**摘要（原清单保留）**：
+
 ```
 Types ← 所有模块（被依赖最多，所以改动代价最高）
 Tracer ← 所有模块（横切）
@@ -148,6 +150,42 @@ LLMGateway ← Planner / Gate / Agent
 ToolSandbox ← Agent
 其他：Orchestrator → 全部（中枢）
 ```
+
+### N×N 直接依赖矩阵（W2 汇总，2026-11-28）
+
+只画**直接依赖**；间接调用（如 Orchestrator 经 Agent 用 ToolSandbox）不画线。读法：行依赖列，例如 `Au` 行 `Ty` 列 ✓ = Auctioneer 依赖 Types。
+
+`Ty`=Types，`Pl`=Planner，`Au`=Auctioneer，`Ag`=Agent，`Or`=Orchestrator，`QG`=QualityGate，`Co`=ConflictResolver，`TS`=ToolSandbox，`BT`=BuiltinTools，`LLM`=LLMGateway，`SS`=StateStore，`Tr`=Tracer，`AM`=AgentMemory，`EB`=EventBus，`EF`=EvalFramework。
+
+| 依赖方 \ 被依赖方 | Ty | Pl | Au | Ag | Or | QG | Co | TS | BT | LLM | SS | Tr | AM | EB | EF |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Ty | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
+| Pl | ✓ | · | · | · | · | · | · | · | · | ✓ | · | ? | · | · | · |
+| Au | ✓ | · | · | ✓ | · | · | · | · | · | · | · | ? | ✓ | · | · |
+| Ag | ✓ | · | · | · | · | · | · | ✓ | · | ✓ | · | ✓ | ✓ | · | · |
+| Or | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | · | · | · | ✓ | ✓ | ✓ | ✓ | · |
+| QG | ? | · | · | · | · | · | · | · | · | ? | ? | ? | · | · | · |
+| Co | ✓ | · | · | · | · | · | · | · | · | · | ✓ | ? | · | · | · |
+| TS | ✓ | · | · | · | · | · | · | · | ✓ | · | · | ✓ | · | · | · |
+| BT | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
+| LLM | ✓ | · | · | · | · | · | · | · | · | · | · | ✓ | · | · | · |
+| SS | ✓ | · | · | · | · | · | · | · | · | · | · | ? | · | · | · |
+| Tr | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
+| AM | ✓ | · | · | · | · | · | · | · | · | · | · | ? | · | · | · |
+| EB | ✓ | · | · | · | · | · | · | · | · | · | · | ? | · | · | · |
+| EF | ✓ | · | · | · | ✓ | · | · | · | · | · | ✓ | ? | · | · | · |
+
+> 图例：✓ = 已确认的直接依赖（双方报告或代码可见）；? = 单方报告/待确认；· = 无直接依赖。
+>
+> **已确认（2026-11-28）**：
+> - `Conflict → StateStore`：`detect` 读取 events / artifacts 做冲突检测。
+> - `AgentMemory`：`ExecutionRecord` 用内部字典存，不依赖 StateStore；`record` 由 Orchestrator 调用，`performance` 由 Auctioneer 调用，`reference` 由 Agent 调用。
+>
+> **W2 汇总时的待确认项**：
+> - `QualityGate` 整行未交，按 §2.3 原清单暂标 `?`（Types / LLMGateway / StateStore / Tracer）。
+> - `Tracer` 列：§2.3 说横切全部模块，但只有 Agent / Orchestrator / ToolSandbox / LLMGateway 明确写了 Tracer；其余标 `?`，组会确认是否打点。
+>
+> 口径说明：矩阵按 §2.2 的 15 个模块（含 Types）列；W2.md 的「12 个模块」是不含 Types / BuiltinTools / EvalFramework 的另一种口径，待统一。
 
 **禁止的依赖方向**（违反会导致循环依赖）：
 
@@ -1468,6 +1506,9 @@ class AgentMemory:
     def reference(self, task_type: str, limit: int = 2) -> str | None: ...
     def performance(self, task_type: str) -> AgentPerformance | None: ...
 ```
+
+> `ExecutionRecord` 存在 `AgentMemory` 内部字典里，不写 StateStore；StateStore 只存成果物和事件。
+> 调用方：`record` 由 Orchestrator 门控后回写；`performance` 由 Auctioneer 竞标时读取；`reference` 由 Agent 执行时读取。
 
 ### 四类数据结构
 
