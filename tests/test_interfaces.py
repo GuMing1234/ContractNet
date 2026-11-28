@@ -112,11 +112,19 @@ def test_design_chapter6_matches_code():
 # 失败路径：设计文档 §6 公约第 4 条「任何接口的失败路径都要有测试」
 # ──────────────────────────────────────────────
 class _FakeAgent:
-    '''最小 Agent 桩：只实现竞标所需的部分。'''
+    '''最小 Agent 桩：只实现 Auctioneer 阶段 1 会读到的部分。
 
-    def __init__(self, agent_id: str, task_types: list[str]) -> None:
+    ⚠️ tools / is_busy 不是可选的：Auctioneer 的预筛会读它们，
+       替身缺字段会在新增能力匹配规则时立刻 AttributeError。
+    '''
+
+    def __init__(
+        self, agent_id: str, task_types: list[str], tools: list[str] | None = None
+    ) -> None:
         self.agent_id = agent_id
         self.task_types = task_types
+        self.tools = tools or []
+        self.is_busy = False
 
     def bid(self, contract: Contract) -> Bid:
         return Bid(contract_id=contract.contract_id, agent_id=self.agent_id, capability=0.5)
@@ -170,9 +178,10 @@ def test_wildcard_agent_does_not_win_on_tie():
     contract = _contract().model_copy(update={'task_type': 'code'})
 
     for ordering in (agents, list(reversed(agents))):
-        winner = Auctioneer().auction(contract, ordering)
-        assert winner is not None
-        assert winner.agent_id == 'agent_coder', f'列表顺序 {[a.agent_id for a in ordering]} 下派错人'
+        res = Auctioneer().auction(contract, ordering)
+        assert res.winner is not None
+        ids = [a.agent_id for a in ordering]
+        assert res.winner.agent_id == 'agent_coder', f'列表顺序 {ids} 下派错人'
 
 
 def test_orchestrator_cancel_and_status_raise():

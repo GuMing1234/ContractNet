@@ -53,6 +53,6 @@ def test_task_routed_to_right_agent(task_type, expected_agent):
         BaseAgent('agent_general', 'General', ['*']),
     ]
     contract = Contract(task_id='t1', task_type=task_type, description='随便一句描述，不含关键词')
-    winner = Auctioneer().auction(contract, agents)
-    assert winner is not None
-    assert winner.agent_id == expected_agent
+    res = Auctioneer().auction(contract, agents)
+    assert res.winner is not None
+    assert res.winner.agent_id == expected_agent
