@@ -36,7 +36,7 @@ class TaskStatus(str, Enum):
     RUNNING = 'running'          # 执行中
     REVIEWING = 'reviewing'      # 质量门控中
     DONE = 'done'                # 完成
-    FAILED = 'failed'            # 失败（重试耗尽）
+    FAILED = 'failed'            # 失败：重规划失败 / 资源耗尽后不可恢复
     REPLANNED = 'replanned'      # 已被子任务替代
     IMPOSSIBLE = 'impossible'    # 无人能接
 
