@@ -140,6 +140,8 @@
 
 ## 2.3 依赖关系
 
+**摘要（原清单保留）**：
+
 ```
 Types ← 所有模块（被依赖最多，所以改动代价最高）
 Tracer ← 所有模块（横切）
@@ -148,6 +150,41 @@ LLMGateway ← Planner / Gate / Agent
 ToolSandbox ← Agent
 其他：Orchestrator → 全部（中枢）
 ```
+
+### N×N 直接依赖矩阵（W2 汇总，2026-11-28）
+
+只画**直接依赖**；间接调用（如 Orchestrator 经 Agent 用 ToolSandbox）不画线。读法：行依赖列，例如 `Au` 行 `Ty` 列 ✓ = Auctioneer 依赖 Types。
+
+`Ty`=Types，`Pl`=Planner，`Au`=Auctioneer，`Ag`=Agent，`Or`=Orchestrator，`QG`=QualityGate，`Co`=ConflictResolver，`TS`=ToolSandbox，`BT`=BuiltinTools，`LLM`=LLMGateway，`SS`=StateStore，`Tr`=Tracer，`AM`=AgentMemory，`EB`=EventBus，`EF`=EvalFramework。
+
+| 依赖方 \ 被依赖方 | Ty | Pl | Au | Ag | Or | QG | Co | TS | BT | LLM | SS | Tr | AM | EB | EF |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Ty | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
+| Pl | ✓ | · | · | · | · | · | · | · | · | ✓ | · | ? | · | · | · |
+| Au | ✓ | · | · | ✓ | · | · | · | · | · | · | · | ? | ? | · | · |
+| Ag | ✓ | · | · | · | · | · | · | ✓ | · | ✓ | · | ✓ | ✓ | · | · |
+| Or | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | · | · | · | ✓ | ✓ | ✓ | ✓ | · |
+| QG | ? | · | · | · | · | · | · | · | · | ? | ? | ? | · | · | · |
+| Co | ✓ | · | · | · | · | · | · | · | · | · | ? | ? | · | · | · |
+| TS | ✓ | · | · | · | · | · | · | · | ✓ | · | · | ✓ | · | · | · |
+| BT | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
+| LLM | ✓ | · | · | · | · | · | · | · | · | · | · | ✓ | · | · | · |
+| SS | ✓ | · | · | · | · | · | · | · | · | · | · | ? | · | · | · |
+| Tr | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
+| AM | ✓ | · | · | · | · | · | · | · | · | · | ? | ? | · | · | · |
+| EB | ✓ | · | · | · | · | · | · | · | · | · | · | ? | · | · | · |
+| EF | ✓ | · | · | · | ✓ | · | · | · | · | · | ✓ | ? | · | · | · |
+
+> 图例：✓ = 已确认的直接依赖（双方报告或代码可见）；? = 单方报告/待确认；· = 无直接依赖。
+>
+> **W2 汇总时的待确认项**：
+> - `QualityGate` 整行未交，按 §2.3 原清单暂标 `?`（Types / LLMGateway / StateStore / Tracer）。
+> - `Conflict → StateStore`：§2.3 原清单有，Conflict 报告未列，标 `?`。
+> - `Auctioneer → AgentMemory`、`Agent → AgentMemory`：两边报告不一致，标 `?`。
+> - `AgentMemory → StateStore`：两边报告都写了，但 §6 StateStore 没有 `ExecutionRecord` 接口，标 `?`（补 API 或改为内部存储）。
+> - `Tracer` 列：§2.3 说横切全部模块，但只有 Agent / Orchestrator / ToolSandbox / LLMGateway 明确写了 Tracer；其余标 `?`，组会确认是否打点。
+>
+> 口径说明：矩阵按 §2.2 的 15 个模块（含 Types）列；W2.md 的「12 个模块」是不含 Types / BuiltinTools / EvalFramework 的另一种口径，待统一。
 
 **禁止的依赖方向**（违反会导致循环依赖）：
 
