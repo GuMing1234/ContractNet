@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import time
 import uuid
+from typing import ContextManager
 
 
 class Tracer:
@@ -20,7 +21,7 @@ class Tracer:
         self._depth = 0
 
     @contextlib.contextmanager
-    def span(self, name: str, **attrs):
+    def span(self, name: str, **attrs) -> ContextManager:
         '''用法：
 
         with tracer.span('planner.plan', goal=goal):

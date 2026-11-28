@@ -32,7 +32,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from contractnet.core.types import Task, TaskDAG
+from contractnet.core.types import PlanContext, Task, TaskDAG
 
 if TYPE_CHECKING:
     from contractnet.llm.gateway import LLMGateway
@@ -83,11 +83,10 @@ class Planner:
     # ──────────────────────────────────────────
     # 对外接口
     # ──────────────────────────────────────────
-    def plan(self, goal: str, context=None) -> TaskDAG:
+    def plan(self, goal: str, context: PlanContext | None = None) -> TaskDAG:
         '''把目标拆成子任务图。
 
         context 的用途（W3 起生效）：已有文件、可用 Agent 的 task_type、近期目标。
-        TODO(W2): 类型收窄为 PlanContext(BaseModel)。
         '''
         if self.llm is None:
             self.last_strategy = 'template'
