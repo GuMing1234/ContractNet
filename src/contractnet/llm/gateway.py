@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import os
 
+from contractnet.core.types import LLMResponse
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,10 +41,9 @@ class LLMGateway:
         '''
         raise NotImplementedError('W3 实现')
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None, **opts):
+    def chat(self, messages: list[dict], tools: list[dict] | None = None, **opts) -> LLMResponse:
         '''多轮对话 + 工具定义，供 ReAct 循环使用。
 
-        TODO(W3): 实现。返回内容要能拿到 content 与 tool_calls；
-                  返回类型 LLMResponse 在 W2 接口冻结时定稿。
+        TODO(W3): 实现。返回内容要能拿到 content 与 tool_calls。
         '''
         raise NotImplementedError('W3 实现')

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from contractnet.core.types import Event
+from contractnet.core.types import Artifact, Event
 
 
 class StateStore:
@@ -18,14 +18,14 @@ class StateStore:
         self._artifacts: dict = {}
         self._events: list[Event] = []
 
-    def save_artifact(self, artifact) -> str:
+    def save_artifact(self, artifact: Artifact) -> str:
         self._artifacts[artifact.artifact_id] = artifact
         return artifact.artifact_id
 
-    def get_artifact(self, artifact_id: str):
+    def get_artifact(self, artifact_id: str) -> Artifact | None:
         return self._artifacts.get(artifact_id)
 
-    def all_artifacts(self) -> list:
+    def all_artifacts(self) -> list[Artifact]:
         return list(self._artifacts.values())
 
     def log_event(self, event: Event) -> None:
