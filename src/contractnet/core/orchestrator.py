@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import logging
 
+from contractnet.core.auctioneer import RELAX_FACTOR
 from contractnet.core.types import (
     Artifact,
     Contract,
     ContractConstraints,
+    NoBidReason,
     RunResult,
     SystemStatus,
     Task,
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 # W4 落地线程池时才真正使用；本期只做常量化与测试（TASKS 2.5）。
 DEFAULT_MAX_CONCURRENT = 4
 DEFAULT_TASK_TIMEOUT_SECONDS = 180
+DEFAULT_TASK_STEPS = 15          # 与 Contract.deadline_steps 的默认值一致
 
 
 class Orchestrator:
@@ -75,6 +78,7 @@ class Orchestrator:
         logger.info('目标已分解为 %d 个子任务', len(dag.tasks))
 
         produced: list[Artifact] = []
+        relaxed: set[str] = set()      # 无人竞标只放宽重发一次（§3.3）；不写 Task 字段
 
         while not dag.all_terminal():
             ready = dag.ready_tasks()
@@ -83,7 +87,7 @@ class Orchestrator:
                 break
 
             for task in ready:
-                artifact = self._run_one(task, dag)
+                artifact = self._run_one(task, dag, relaxed)
                 if artifact is not None:
                     produced.append(artifact)
 
@@ -100,25 +104,20 @@ class Orchestrator:
         )
 
     # ──────────────────────────────────────────
-    def _run_one(self, task: Task, dag: TaskDAG) -> Artifact | None:
+    def _run_one(self, task: Task, dag: TaskDAG, relaxed: set[str]) -> Artifact | None:
         '''跑一个任务：造契约 → 竞标 → 执行 → 门控 → 归档/重试。'''
-        contract = Contract(
-            task_id=task.task_id,
-            task_type=task.task_type,            # ⚠️ 必须传下去
-            description=task.description,
-            input_artifacts=task.input_artifacts,
-            constraints=ContractConstraints(),
-        )
+        contract = self._make_contract(task, relax=task.task_id in relaxed)
 
         dag.update_status(task.task_id, TaskStatus.BIDDING)
-        winning_bid = self.auctioneer.auction(contract, self._agents)
-        if winning_bid is None:
-            dag.update_status(task.task_id, TaskStatus.IMPOSSIBLE)
-            logger.warning('任务 %s 无人竞标 → impossible', task.task_id)
+        award = self.auctioneer.auction(contract, self._agents)
+        if award.winner is None:
+            self._handle_no_bid(task, dag, award, relaxed)
             return None
 
-        agent = next(a for a in self._agents if a.agent_id == winning_bid.agent_id)
+        relaxed.discard(task.task_id)          # 中标后清掉放宽标记，后续重试重新计算
+        agent = next(a for a in self._agents if a.agent_id == award.winner.agent_id)
         dag.update_status(task.task_id, TaskStatus.RUNNING)
+        # TODO(R4/W4): 线程池落地后，这里必须在 submit 之前 agent.set_busy(True)（ADR-10）
         artifact = agent.execute(contract)
 
         dag.update_status(task.task_id, TaskStatus.REVIEWING)
@@ -141,3 +140,49 @@ class Orchestrator:
             dag.update_status(task.task_id, TaskStatus.FAILED)
             logger.warning('任务 %s 重试耗尽', task.task_id)
         return None
+
+    # ──────────────────────────────────────────
+    @staticmethod
+    def _make_contract(task: Task, relax: bool) -> Contract:
+        '''造契约。relax=True 时只放大资源，**不动 quality_threshold**（§4.2 / §5.1）。
+
+        ⚠️ 只自动执行 scale 类建议（deadline_steps / max_tokens）。
+           建议里 drop 类（削减 required_tools）等于降低能力门槛，需人工确认，
+           所以这里不自动执行 —— 那种任务会按「放宽后仍无人」判 IMPOSSIBLE。
+        '''
+        constraints = ContractConstraints()
+        deadline_steps = DEFAULT_TASK_STEPS
+        if relax:
+            deadline_steps = int(deadline_steps * RELAX_FACTOR)
+            constraints = constraints.model_copy(
+                update={'max_tokens': int(constraints.max_tokens * RELAX_FACTOR)}
+            )
+        return Contract(
+            task_id=task.task_id,
+            task_type=task.task_type,            # ⚠️ 必须传下去，别在描述里猜
+            description=task.description,
+            input_artifacts=task.input_artifacts,
+            constraints=constraints,
+            deadline_steps=deadline_steps,
+        )
+
+    def _handle_no_bid(self, task: Task, dag: TaskDAG, award, relaxed: set[str]) -> None:
+        '''无人应标的三路处理（§3.13）。
+
+        ⚠️ ALL_BUSY 是「等得到」的：既不消耗放宽额度，也不判 IMPOSSIBLE，
+           否则几个能接的 Agent 同时忙，就会把一个健康任务永久判死。
+        '''
+        if award.reason is NoBidReason.ALL_BUSY:
+            dag.update_status(task.task_id, TaskStatus.PENDING)
+            logger.warning('任务 %s 无人应标：能接的都忙着，下一轮再试', task.task_id)
+            return
+        if award.relax_hints and task.task_id not in relaxed:
+            relaxed.add(task.task_id)
+            dag.update_status(task.task_id, TaskStatus.PENDING)
+            logger.warning(
+                '任务 %s 无人应标（%s），按建议 %s 放宽后重发',
+                task.task_id, award.reason, [h.field for h in award.relax_hints],
+            )
+            return
+        dag.update_status(task.task_id, TaskStatus.IMPOSSIBLE)
+        logger.warning('任务 %s 判定 impossible，原因=%s', task.task_id, award.reason)
