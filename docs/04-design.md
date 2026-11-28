@@ -535,7 +535,7 @@ class CapabilityProfile(BaseModel):
 
 ```
 T+0      CLI 接收目标
-T+50     Planner 分解（LLM 1 次调用，2~5s）
+T+50ms   Planner 分解（LLM 1 次调用，2~5s）
 T+3s     DAG 就绪 → 取 ready_tasks
 T+3s     对每个 ready task：造 Contract → 广播 → 收 Bid → 仲裁
          首次无人竞标 → 放宽约束后重发；仍无人 → IMPOSSIBLE
@@ -650,7 +650,8 @@ def run(goal):
             # relaxed 时放宽 max_steps / max_tokens，不动 quality_threshold
             contract = contracts.create(task, relaxed=task.id in relaxed)
             dag.update_status(task.id, BIDDING)
-            winner = auctioneer.auction(contract, agents, busy_set)
+            available_agents = [a for a in agents if not a.is_busy]  # ADR-10：竞标前过滤忙碌 Agent
+            winner = auctioneer.auction(contract, available_agents)
             if winner is None:
                 if task.id in relaxed:
                     dag.update_status(task.id, IMPOSSIBLE)
@@ -1827,12 +1828,21 @@ def run(benchmark: BenchmarkTask, config: EvalConfig, repeat: int = 5) -> EvalRe
   "benchmark": "B1",
   "config": "contractnet_v1",
   "repeat": 5,
-  "success_rate":    {"median": 0.80, "min": 0.60, "max": 1.00},
-  "tokens_per_task": {"median": 12345, "min": 9800, "max": 15000},
-  "step_efficiency": {"median": 1.32, "min": 1.10, "max": 1.60},
+  "metrics": {
+    "success_rate":           {"median": 0.80,  "min": 0.60,  "max": 1.00},
+    "first_pass_rate":        {"median": 0.60,  "min": 0.40,  "max": 0.80},
+    "step_efficiency":        {"median": 1.32,  "min": 1.10,  "max": 1.60},
+    "avg_steps":              {"median": 8.0,   "min": 6.0,   "max": 12.0},
+    "tokens_per_task":        {"median": 12345, "min": 9800,  "max": 15000},
+    "duration_ms":            {"median": 42000, "min": 31000, "max": 58000},
+    "replan_rate":            {"median": 0.10,  "min": 0.00,  "max": 0.20},
+    "conflict_detection_rate":{"median": 0.95,  "min": 0.80,  "max": 1.00}
+  },
   "config_snapshot": {"model": "...", "max_concurrent": 4, "commit": "..."}
 }
 ```
+
+> 示例省略 `failures` / `started_at` / `duration_s`；`metrics` 必须包含上表 8 个键，不得只报其中几个。
 
 ### 失效模式分析
 
@@ -1946,8 +1956,8 @@ complete(prompt: str, **opts) -> str
 chat(messages: list[dict], tools=None, **opts) -> LLMResponse
 
 # ── StateStore ──
-save_artifact(a: Artifact) -> str
-get_artifact(id: str) -> Artifact | None
+save_artifact(artifact: Artifact) -> str
+get_artifact(artifact_id: str) -> Artifact | None
 all_artifacts() -> list[Artifact]
 log_event(e: Event) -> None
 events(trace_id: str | None = None) -> list[Event]
