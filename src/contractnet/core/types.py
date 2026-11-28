@@ -11,7 +11,7 @@ import uuid
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +187,53 @@ class Bid(BaseModel):
     confidence: float = 0.5          # 置信度 [0,1]（不要用 LLM 自报，用历史成功率）
     plan: str = ''
 
+# ──────────────────────────────────────────────
+# 竞标结果（Auctioneer 的返回类型）
+# ──────────────────────────────────────────────
+class NoBidReason(str, Enum):
+    '''无人竞标的四种原因。只有 ALL_BUSY 是「等得到」的。'''
+    ALL_BUSY      = 'all_busy'        # 有能力接，但全忙 → 等，别放宽
+    NO_MATCH      = 'no_match'        # 没有 task_types 覆盖 → 放宽救不了
+    TOOLS_MISSING = 'tools_missing'   # 类型匹配，required_tools 不够，可以给放宽建议
+    DECLINED      = 'declined'        # 能接、也空着，但 bid() 主动拒了
+
+
+class BidRejection(BaseModel):
+    '''一个 Agent 没出价的原因。busy 与 reason 正交，别混进枚举。'''
+    agent_id: str
+    reason: NoBidReason | None = None   # None = 能力没问题（只是忙）
+    busy: bool = False
+    detail: str = ''
+
+
+class RelaxHint(BaseModel):
+    '''一条放宽建议。只描述，不执行——改 Contract 重发由 Orchestrator 执行。'''
+    field: str                                # 'max_steps' / 'max_tokens' / 'required_tools'
+    action: Literal['scale', 'drop'] = 'scale'
+    value: float = 1.5                        # scale 的倍数；drop 时忽略
+    detail: str = ''
+
+
+class AuctionResult(BaseModel):
+    '''一轮竞标的完整结果。替掉 Bid | None，让 None 也能带话。'''
+    contract_id: str
+    winner: Bid | None = None
+    winner_score: float | None = None          # 未评分时 None，不是 0（ADR-04）
+    bids: list[Bid] = Field(default_factory=list)
+    rejections: list[BidRejection] = Field(default_factory=list)
+    reason: NoBidReason | None = None          # winner is None 时必填
+    relax_hints: list[RelaxHint] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def reason_required_when_no_winner(self):
+        '''不变量：winner 为空时 reason 必填。
+
+        「无人竞标」这个结论必须带原因，便于 Orchestrator 分清
+        「没人会」和「都忙着」，又会退化成把忙当 IMPOSSIBLE 的老 bug。
+        '''
+        if self.winner is None and self.reason is None:
+            raise ValueError('winner 为空时必须给出 reason：这轮到底为什么没人接')
+        return self
 
 # ──────────────────────────────────────────────
 # 成果物
