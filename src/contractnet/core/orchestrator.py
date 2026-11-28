@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from contractnet.core.auctioneer import RELAX_FACTOR
 from contractnet.core.types import (
@@ -31,6 +32,11 @@ DEFAULT_MAX_CONCURRENT = 4
 DEFAULT_TASK_TIMEOUT_SECONDS = 180
 DEFAULT_TASK_STEPS = 15          # 与 Contract.deadline_steps 的默认值一致
 
+# 无人应标时的退避（§4.2）：本轮一个都没派发就睡一下。
+# 没有它，PENDING 任务会在下一轮被立刻重拍，把主循环变成空转、把轮次额度烧光。
+RETRY_BACKOFF_SECONDS = 0.05
+MAX_BUSY_WAITS = 20              # 单个任务等空闲的轮数上限，超限只记 error，不伪造终态
+
 
 class Orchestrator:
     def __init__(
@@ -49,6 +55,8 @@ class Orchestrator:
         self.store = store
         self.max_concurrent = max_concurrent
         self._agents: list = []
+        self._dispatched = False          # 本轮是否真的派发过任务（决定要不要退避）
+        self._busy_waits: dict[str, int] = {}   # task_id → 等空闲的轮数
 
     def register(self, agent) -> None:
         self._agents.append(agent)
@@ -86,10 +94,17 @@ class Orchestrator:
                 logger.warning('没有可执行的任务，但图未完成 —— 检查是否卡死')
                 break
 
+            self._dispatched = False
             for task in ready:
                 artifact = self._run_one(task, dag, relaxed)
                 if artifact is not None:
                     produced.append(artifact)
+
+            if not self._dispatched:
+                # 本轮全在等（全忙 / 全被挡）：必须退避，否则这些 PENDING 任务会在
+                # 下一轮被立刻重拍，把主循环变成空转、把轮次额度烧光。
+                # TODO(W4): 换成阻塞等待「任意任务完成」的事件，而不是定长 sleep。
+                time.sleep(RETRY_BACKOFF_SECONDS)
 
         success = all(t.status is TaskStatus.DONE for t in dag.tasks.values())
         return RunResult(
@@ -117,6 +132,7 @@ class Orchestrator:
         relaxed.discard(task.task_id)          # 中标后清掉放宽标记，后续重试重新计算
         agent = next(a for a in self._agents if a.agent_id == award.winner.agent_id)
         dag.update_status(task.task_id, TaskStatus.RUNNING)
+        self._dispatched = True
         # TODO(R4/W4): 线程池落地后，这里必须在 submit 之前 agent.set_busy(True)（ADR-10）
         artifact = agent.execute(contract)
 
@@ -171,10 +187,22 @@ class Orchestrator:
 
         ⚠️ ALL_BUSY 是「等得到」的：既不消耗放宽额度，也不判 IMPOSSIBLE，
            否则几个能接的 Agent 同时忙，就会把一个健康任务永久判死。
+        ⚠️ 第三路才判 IMPOSSIBLE；TOOLS_MISSING 走的正是这一路 ——
+           削 required_tools 是降低能力门槛，需人工确认，不在这里自动做。
         '''
         if award.reason is NoBidReason.ALL_BUSY:
+            waits = self._busy_waits.get(task.task_id, 0) + 1
+            self._busy_waits[task.task_id] = waits
             dag.update_status(task.task_id, TaskStatus.PENDING)
-            logger.warning('任务 %s 无人应标：能接的都忙着，下一轮再试', task.task_id)
+            if waits > MAX_BUSY_WAITS:
+                logger.error(
+                    '任务 %s 已等空闲 %d 轮仍无人可接：调度层可能卡住，检查 is_busy 是否有人释放',
+                    task.task_id, waits,
+                )
+            else:
+                logger.warning(
+                    '任务 %s 无人应标：能接的都忙着（第 %d 轮），等下一轮', task.task_id, waits
+                )
             return
         if award.relax_hints and task.task_id not in relaxed:
             relaxed.add(task.task_id)
@@ -184,5 +212,10 @@ class Orchestrator:
                 task.task_id, award.reason, [h.field for h in award.relax_hints],
             )
             return
+        self._busy_waits.pop(task.task_id, None)
         dag.update_status(task.task_id, TaskStatus.IMPOSSIBLE)
-        logger.warning('任务 %s 判定 impossible，原因=%s', task.task_id, award.reason)
+        logger.warning(
+            '任务 %s 判定 impossible，原因=%s，缺口=%s',
+            task.task_id, award.reason,
+            [r.detail for r in award.rejections if r.reason is not None],
+        )

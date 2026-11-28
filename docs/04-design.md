@@ -576,7 +576,7 @@ class CapabilityProfile(BaseModel):
 |---|---|---|---|
 | `ALL_BUSY` | `all_busy` | 有能力接，但全部忙 | 等待重试；不放宽、不判 IMPOSSIBLE |
 | `NO_MATCH` | `no_match` | 没有 Agent 的 task_types 覆盖 | 直接 IMPOSSIBLE（放宽救不了） |
-| `TOOLS_MISSING` | `tools_missing` | 类型匹配，required_tools 不足 | 放宽 required_tools 后重发 |
+| `TOOLS_MISSING` | `tools_missing` | 类型匹配，required_tools 不足 | 直接 IMPOSSIBLE，缺口写进日志（不自动削 required_tools） |
 | `DECLINED` | `declined` | 能接且空闲，但 bid() 返回 None | 放宽资源后重发 |
 
 **`BidRejection`（单个 Agent 未出价的原因）**
@@ -593,7 +593,7 @@ class CapabilityProfile(BaseModel):
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `field` | `str` | 目标字段名，闭集见 §5.2 |
-| `action` | `Literal['scale', 'drop']` | 放大倍数 / 去掉该项 |
+| `action` | `Literal['scale', 'drop']` | `scale` 放大倍数 / `drop` 去掉该项。**当前只产生 `scale`**：`drop` 等于降低能力门槛，需人工确认 |
 | `value` | `float` | `scale` 时的倍数 |
 | `detail` | `str` | 代价说明，如「去掉 code_run 意味着产出未经执行验证」 |
 
@@ -659,11 +659,14 @@ sequenceDiagram
                 O->>O: 造 Contract（task_type 必带）
                 O->>O: BIDDING
                 O->>AU: auction(contract, agents)
-                AU-->>O: 中标 Bid / None 〔竞标 0 次 LLM，ADR-11〕
-                alt 无人竞标
-                    alt 首次（未放宽）
-                        O->>O: PENDING（放宽约束后重发）
-                    else 放宽后仍无人
+                AU-->>O: AuctionResult（winner + reason + relax_hints）〔竞标 0 次 LLM，ADR-11〕
+                alt 无人应标
+                    alt reason == ALL_BUSY
+                        O->>O: PENDING（等空闲；不放宽、不判 IMPOSSIBLE）
+                        Note over O: 本轮无派发 → 退避等待，避免空转
+                    else 有 relax_hints 且首次
+                        O->>O: PENDING（按建议放宽资源后重发）
+                    else 无可放宽之处 / 已放宽过
                         O->>O: IMPOSSIBLE
                     end
                 else 中标
@@ -714,6 +717,7 @@ sequenceDiagram
 def run(goal):
     dag = planner.plan(goal)                  # 1 次 LLM
     relaxed: set[str] = set()                 # 无人竞标只放宽重发一次；不写 Task 字段
+    busy_waits: dict[str, int] = {}           # 每个任务等空闲等了几轮（防无限等）
 
     while not dag.all_terminal():             # ← 用 all_terminal，不是 all_done
         ready = dag.ready_tasks()
@@ -726,29 +730,41 @@ def run(goal):
                 break                          # 必须有的出口
             continue
 
-        # 派发：不阻塞
-        inflight = []
+        # 派发：不阻塞。忙碌过滤在 Auctioneer 内部完成（ADR-10），调用方不要预先筛
+        dispatched = False
         for task in ready:
-            # relaxed 时放宽 max_steps / max_tokens，不动 quality_threshold
+            # relaxed 时只放大资源（deadline_steps / max_tokens），不动 quality_threshold
             contract = contracts.create(task, relaxed=task.id in relaxed)
             dag.update_status(task.id, BIDDING)
-            available_agents = [a for a in agents if not a.is_busy]  # ADR-10：竞标前过滤忙碌 Agent
-            winner = auctioneer.auction(contract, available_agents)
-            if winner is None:
-                if task.id in relaxed:
-                    dag.update_status(task.id, IMPOSSIBLE)
-                else:
+            award = auctioneer.auction(contract, agents)
+            if award.winner is None:
+                if award.reason is ALL_BUSY:
+                    # 等得到：不放宽、不判 IMPOSSIBLE；只计数，超限记 error
+                    busy_waits[task.id] = busy_waits.get(task.id, 0) + 1
+                    if busy_waits[task.id] > MAX_BUSY_WAITS:
+                        log.error('task=%s 等了 %d 轮仍没有空闲 Agent', task.id, MAX_BUSY_WAITS)
+                    dag.update_status(task.id, PENDING)
+                elif award.relax_hints and task.id not in relaxed:
                     relaxed.add(task.id)
-                    dag.update_status(task.id, PENDING)  # 下一轮放宽约束重发
+                    dag.update_status(task.id, PENDING)   # 下一轮按建议放宽资源重发
+                else:
+                    dag.update_status(task.id, IMPOSSIBLE)
                 continue
+            busy_waits.pop(task.id, None)
             relaxed.discard(task.id)              # 中标后清掉放宽标记，后续重试重新计算
             dag.update_status(task.id, RUNNING)
-            inflight.append(executor.submit(agent_execute, contract, winner))
+            dispatched = True
+            inflight.append(executor.submit(agent_execute, contract, award.winner))
 
         # 收集：随便谁完成都处理（异步，不在主循环里调 LLM）
         for done in executor.drain_completed():
             gate_result = done.gate_result        # Gate 已在线程里跑完
             handle_result(done.task, gate_result, dag)
+
+        if not dispatched:
+            # 本轮一个都没派发（全在忙 / 全被挡）→ 必须退避，否则 PENDING 任务会被反复重拍空转。
+            # 没有这一步，ALL_BUSY 会在几百毫秒内把 200 轮额度烧光。
+            sleep(RETRY_BACKOFF_SECONDS)
 ```
 
 ## 4.3 就绪判定
@@ -907,13 +923,15 @@ def replan(self, failed, reason):
 | 综合评分并授标 | 失败处理 |
 | 无竞标时的诊断与放宽建议（重发由 Orchestrator 执行） | — |
 
-> 无竞标时 Auctioneer 只返回 `None` 并给出原因/放宽建议；Contract 的放宽与重新广播由 Orchestrator 执行（Task 状态只能由 Orchestrator 写，ADR-02）。
+> 无竞标时 Auctioneer **不改任何状态**，只返回 `AuctionResult`：`reason` 说明「没人会 / 都忙着 / 被拒」，
+> `relax_hints` 给出可放宽的字段。Contract 的放宽与重新广播由 Orchestrator 执行（Task 状态只能由 Orchestrator 写，ADR-02）。
+> 忙碌判定（`is_busy`）**只读**，唯一写方是 Orchestrator，且在 submit 之前写（ADR-10 / ADR-16）。
 
 ### 接口
 
 ```python
 class Auctioneer:
-    def auction(self, contract: Contract, agents: list[BaseAgent]) -> Bid | None: ...
+    def auction(self, contract: Contract, agents: list[BaseAgent]) -> AuctionResult: ...
     def score(self, bid: Bid, contract: Contract) -> float: ...
     def history(self, contract_id: str) -> list[Bid]: ...
 ```
@@ -2010,7 +2028,7 @@ plan(goal: str, context: PlanContext | None = None) -> TaskDAG
 replan(failed_task: Task, reason: str) -> tuple[TaskDAG, list[str]]
 
 # ── Auctioneer ──
-auction(contract: Contract, agents: list[BaseAgent]) -> Bid | None
+auction(contract: Contract, agents: list[BaseAgent]) -> AuctionResult
 score(bid: Bid, contract: Contract) -> float
 history(contract_id: str) -> list[Bid]
 
@@ -2126,6 +2144,7 @@ run(benchmark: BenchmarkTask, config: EvalConfig, repeat: int = 5) -> EvalResult
 | **ADR-13** | 通信层形态                   | **抽象接口 + 内存实现**    | 单进程下 Redis 不增加能力；抽象层已隔离二期变化点      | 直接引入 Redis → 约 40h，且调试复杂度上升 |
 | **ADR-14** | 对比基线数量                  | **单 Agent + 一个现成框架（硬性）** | 可回答"是否优于成熟方案"，同时控制复现成本           | 复现两个框架 → 约 40h，易陷入调试    |
 | **ADR-15** | 指标目标值                   | **完成率 ≥80%、Token 降 ≥25%（基于 5 次重复中位数）** | 3 个基准任务上 85% 等同全过，无容错空间         | 维持 85%/30% → 数据难以成立        |
+| **ADR-16** | 无人竞标时怎么把「为什么」交给调度器 | **`auction` 直接返回 `AuctionResult`（`reason` + `relax_hints`）；`is_busy` 只读、单一来源** | `Bid \| None` 装不下原因；另开 `diagnose()` 会二次查询到已变化的 `is_busy`，并把预筛规则复制成两份。一次返回让调用方必须处理 `reason` | 事后补一个诊断接口 → 诊断会说谎、规则必然漂移；由调用方预筛忙碌 → 把 Auctioneer 变瞎，分不清「没人会」和「都忙」 |
 
 ---
 

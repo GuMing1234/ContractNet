@@ -77,12 +77,15 @@ def test_no_match_when_task_type_not_covered():
     assert res.relax_hints == [], '放宽救不了类型不匹配，不该给出建议'
 
 
-def test_tools_missing_suggests_dropping_required_tool():
+def test_tools_missing_gives_no_relax_hint():
+    '''缺工具时不给放宽建议：削 required_tools 是降门槛、需人工确认，
+       自动重发只会原样再失败一次，所以这里应当没有 hint，让调用方直接判 IMPOSSIBLE。'''
     agent = BaseAgent('a1', 'Coder', ['code'], tools=[])
     res = Auctioneer().auction(make_contract('code', ['code_run']), [agent])
 
     assert res.reason is NoBidReason.TOOLS_MISSING
-    assert [(h.field, h.action) for h in res.relax_hints] == [('required_tools.code_run', 'drop')]
+    assert res.relax_hints == []
+    assert 'code_run' in res.rejections[0].detail, '缺口要留在 rejections 里，供日志与人工判断'
 
 
 def test_tools_missing_not_reported_when_tools_covered():
