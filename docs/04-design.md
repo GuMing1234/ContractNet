@@ -161,27 +161,28 @@ ToolSandbox ← Agent
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Ty | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
 | Pl | ✓ | · | · | · | · | · | · | · | · | ✓ | · | ? | · | · | · |
-| Au | ✓ | · | · | ✓ | · | · | · | · | · | · | · | ? | ? | · | · |
+| Au | ✓ | · | · | ✓ | · | · | · | · | · | · | · | ? | ✓ | · | · |
 | Ag | ✓ | · | · | · | · | · | · | ✓ | · | ✓ | · | ✓ | ✓ | · | · |
 | Or | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | · | · | · | ✓ | ✓ | ✓ | ✓ | · |
 | QG | ? | · | · | · | · | · | · | · | · | ? | ? | ? | · | · | · |
-| Co | ✓ | · | · | · | · | · | · | · | · | · | ? | ? | · | · | · |
+| Co | ✓ | · | · | · | · | · | · | · | · | · | ✓ | ? | · | · | · |
 | TS | ✓ | · | · | · | · | · | · | · | ✓ | · | · | ✓ | · | · | · |
 | BT | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
 | LLM | ✓ | · | · | · | · | · | · | · | · | · | · | ✓ | · | · | · |
 | SS | ✓ | · | · | · | · | · | · | · | · | · | · | ? | · | · | · |
 | Tr | · | · | · | · | · | · | · | · | · | · | · | · | · | · | · |
-| AM | ✓ | · | · | · | · | · | · | · | · | · | ? | ? | · | · | · |
+| AM | ✓ | · | · | · | · | · | · | · | · | · | · | ? | · | · | · |
 | EB | ✓ | · | · | · | · | · | · | · | · | · | · | ? | · | · | · |
 | EF | ✓ | · | · | · | ✓ | · | · | · | · | · | ✓ | ? | · | · | · |
 
 > 图例：✓ = 已确认的直接依赖（双方报告或代码可见）；? = 单方报告/待确认；· = 无直接依赖。
 >
+> **已确认（2026-11-28）**：
+> - `Conflict → StateStore`：`detect` 读取 events / artifacts 做冲突检测。
+> - `AgentMemory`：`ExecutionRecord` 用内部字典存，不依赖 StateStore；`record` 由 Orchestrator 调用，`performance` 由 Auctioneer 调用，`reference` 由 Agent 调用。
+>
 > **W2 汇总时的待确认项**：
 > - `QualityGate` 整行未交，按 §2.3 原清单暂标 `?`（Types / LLMGateway / StateStore / Tracer）。
-> - `Conflict → StateStore`：§2.3 原清单有，Conflict 报告未列，标 `?`。
-> - `Auctioneer → AgentMemory`、`Agent → AgentMemory`：两边报告不一致，标 `?`。
-> - `AgentMemory → StateStore`：两边报告都写了，但 §6 StateStore 没有 `ExecutionRecord` 接口，标 `?`（补 API 或改为内部存储）。
 > - `Tracer` 列：§2.3 说横切全部模块，但只有 Agent / Orchestrator / ToolSandbox / LLMGateway 明确写了 Tracer；其余标 `?`，组会确认是否打点。
 >
 > 口径说明：矩阵按 §2.2 的 15 个模块（含 Types）列；W2.md 的「12 个模块」是不含 Types / BuiltinTools / EvalFramework 的另一种口径，待统一。
@@ -1504,6 +1505,9 @@ class AgentMemory:
     def reference(self, task_type: str, limit: int = 2) -> str | None: ...
     def performance(self, task_type: str) -> AgentPerformance | None: ...
 ```
+
+> `ExecutionRecord` 存在 `AgentMemory` 内部字典里，不写 StateStore；StateStore 只存成果物和事件。
+> 调用方：`record` 由 Orchestrator 门控后回写；`performance` 由 Auctioneer 竞标时读取；`reference` 由 Agent 执行时读取。
 
 ### 四类数据结构
 
